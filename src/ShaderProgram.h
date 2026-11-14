@@ -13,6 +13,9 @@ public:
   bool Initialize();
 
   bool Uninitalize();
+  // The GL context the objects lived in is gone: forget the names without
+  // touching GL, so the next Initialize() creates them afresh.
+  void ContextLost();
 
   bool InstallShaderSourceFromFile(const char * const filename, GLenum type);
   bool InstallShaderSourceFromMemory(char **sourceStrings, uint32 count, const int *lengths, GLenum type);

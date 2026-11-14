@@ -1,6 +1,6 @@
 # Nuance 0.6.8
 
-A NUON (VM Labs) emulator for Windows and Linux.
+A NUON (VM Labs) emulator for Windows and Linux, and for macOS as a libretro core.
 
 Copyright 2002 - 2007 Mike Perry and 2020 - 2026 all the open source contributors (see separate license.txt)
 
@@ -63,6 +63,38 @@ make -j$(nproc)
 
 The bios.cof, minibios.cof, minibiosX.cof, nuance.cfg and GLSL shader files are
 automatically copied to the build directory by CMake.
+
+## Installation (macOS)
+
+There is no standalone macOS app: the non-Windows standalone build needs X11/GLX.
+On macOS, Nuance runs as a libretro core inside RetroArch. Tested on Apple Silicon
+(macOS 27, RetroArch 1.22.2).
+
+```bash
+git submodule update --init --recursive
+cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_LIBRETRO=ON -B build-libretro
+cmake --build build-libretro --parallel
+
+RA=~/Library/Application\ Support/RetroArch
+cp build-libretro/nuance_libretro.dylib "$RA/cores/"
+cp dist/nuance_libretro.info "$RA/info/"
+mkdir -p ~/Documents/RetroArch/system/nuance
+cp bios.cof minibios.cof minibiosX.cof nuance.cfg ~/Documents/RetroArch/system/nuance/
+
+# The core needs RetroArch's compatibility-profile "gl" driver. With the default
+# driver RetroArch picks a core-profile context and the core fails to start.
+mkdir -p "$RA/config/Nuance"
+echo 'video_driver = "gl"' > "$RA/config/Nuance/Nuance.cfg"
+```
+
+Use a universal RetroArch build (Homebrew: `brew install --cask retroarch-metal`);
+the plain `retroarch` cask is Intel-only. Then Load Core -> "VM Labs - NUON (Nuance)"
+and Load Content.
+
+On Arm64 the core is interpreter-only, because the dynamic recompiler emits x86
+code. Simple content runs at full speed, but demanding games do not (Tempest 3000
+manages about 5 fps on an M4 Pro). The plan for an Arm64 JIT backend is in
+[docs/arm64-jit-plan.md](docs/arm64-jit-plan.md).
 
 ## Project structure
 

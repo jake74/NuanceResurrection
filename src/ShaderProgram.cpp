@@ -71,6 +71,17 @@ bool ShaderProgram::Uninitalize()
   return true;
 }
 
+void ShaderProgram::ContextLost()
+{
+  hProgramObject = 0;
+  hVertexShaderObject = 0;
+  hFragmentShaderObject = 0;
+  bVertexShaderObjectAttached = false;
+  bVertexShaderCodeLoaded = false;
+  bFragmentShaderObjectAttached = false;
+  bFragmentShaderCodeLoaded = false;
+}
+
 void ShaderProgram::PrintInfoLog(GLuint obj, const char *msg)
 {
   // The ARB extension had one call for both; the core API this now uses - and
@@ -130,6 +141,17 @@ bool ShaderProgram::InstallShaderSourceFromFile(const char * const filename, GLe
     fseek(inFile,0,SEEK_SET);
     fread(buffer,sizeof(char),length,inFile);
     fclose(inFile);
+
+    // The file carries the C++ raw-string delimiters that embedded_shaders.h
+    // needs, inside "#ifdef EMBED_HLSL" guards. Most GLSL preprocessors skip
+    // them unread; Apple's still tokenises the skipped lines and rejects the
+    // lone quote ("EOL in string"). Blank the two delimiters out - same length,
+    // same line numbers.
+    for(const char * const delim : { "R\"NUONSHADER(", ")NUONSHADER\"" })
+    {
+      for(char *p = strstr(buffer, delim); p; p = strstr(p, delim))
+        memset(p, ' ', strlen(delim));
+    }
   }
   else
   {

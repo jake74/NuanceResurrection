@@ -468,6 +468,10 @@ void VideoInvalidateGLState()
   // with dead handles and present a black screen.
   bTexturesInitialized = false;
   bShadersInstalled = false;
+  // The program and shader names died with the old context too. Left in place,
+  // Initialize() sees a non-zero program and creates nothing, and the install
+  // then fails against names the new context has never heard of.
+  shaderProgram.ContextLost();
   bSetupViewport = false;
   // The freshly generated mainTexName/osdTexName have no storage until
   // glTexImage2D runs. Force the glTexImage2D upload path (rather than
@@ -556,6 +560,43 @@ void VideoDebugState(char *out, size_t size)
     (unsigned)nonzero, (unsigned)sampled, (int)bOverlayChannelActive);
 }
 #endif
+
+// Streams one channel's pixels into the currently bound texture. The fast path
+// goes through a pixel unpack buffer mapped with glMapBufferRange, which is
+// OpenGL 3.0 / ES 3.0. A 2.1 context without ARB_map_buffer_range - which is
+// what macOS hands out for a compatibility context - fails the map with
+// GL_INVALID_OPERATION, so the first failure switches to a plain
+// glTexSubImage2D from client memory for the rest of the session.
+static void UploadChannelTexture(const GLuint pbo, const GLsizei width, const GLsizei height, const GLint bytesPerPixel,
+                                 const GLenum externalFormat, const GLenum pixelType, const void * const pixels)
+{
+  static bool bMapBufferRangeWorks = true;
+
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+  if(bMapBufferRangeWorks)
+  {
+    const size_t size = (size_t)width * height * bytesPerPixel;
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+    glBufferData(GL_PIXEL_UNPACK_BUFFER, size, nullptr, GL_STREAM_DRAW);
+    GLubyte* const ptr = (GLubyte*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, size, GL_MAP_WRITE_BIT);
+    if(ptr)
+    {
+      memcpy(ptr, pixels, size);
+      glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+      glTexSubImage2D(TEXTURE_TARGET,0,0,0,width,height,externalFormat,pixelType, nullptr);
+      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+      return;
+    }
+
+    bMapBufferRangeWorks = false;
+    while(glGetError() != GL_NO_ERROR) {} // drop the error the failed map left behind
+    glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+  }
+
+  glTexSubImage2D(TEXTURE_TARGET,0,0,0,width,height,externalFormat,pixelType, pixels);
+}
 
 void RenderVideo(const int winwidth, const int winheight)
 {
@@ -910,28 +951,7 @@ render_main_buffer:
     }
     else
     {
-#if 1
-      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, videoTexInfo.mainTexPBO);
-
-      glPixelStorei(GL_PACK_ALIGNMENT, 1);
-      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-      glBufferData(GL_PIXEL_UNPACK_BUFFER, structMainChannel.src_width * structMainChannel.src_height * mainInternalTextureBPC, nullptr, GL_STREAM_DRAW);
-      GLubyte* const ptr = (GLubyte*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, structMainChannel.src_width * structMainChannel.src_height * mainInternalTextureBPC, GL_MAP_WRITE_BIT);
-      if (ptr)
-      {
-        memcpy(ptr, mainPixels, structMainChannel.src_width * structMainChannel.src_height * mainInternalTextureBPC);
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-      }
-      else
-        MessageBox(NULL,"Failed to map main buffer","glMapBufferRange",MB_OK);
-
-      glTexSubImage2D(TEXTURE_TARGET,0,0,0,structMainChannel.src_width,structMainChannel.src_height,mainExternalTextureFormat,mainPixelType, nullptr);
-
-      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-#else
-      glTexSubImage2D(TEXTURE_TARGET,0,0,0,structMainChannel.src_width,structMainChannel.src_height,mainExternalTextureFormat,mainPixelType, mainPixels);
-#endif
+      UploadChannelTexture(videoTexInfo.mainTexPBO, structMainChannel.src_width, structMainChannel.src_height, mainInternalTextureBPC, mainExternalTextureFormat, mainPixelType, mainPixels);
     }
 
     if(bUseSeparateThread) gfx_lock.unlock();
@@ -958,28 +978,7 @@ render_main_buffer:
     }
     else
     {
-#if 1
-      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, videoTexInfo.osdTexPBO);
-
-      glPixelStorei(GL_PACK_ALIGNMENT, 1);
-      glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-      glBufferData(GL_PIXEL_UNPACK_BUFFER, structOverlayChannel.src_width * structOverlayChannel.src_height * osdInternalTextureBPC, nullptr, GL_STREAM_DRAW);
-      GLubyte* const ptr = (GLubyte*)glMapBufferRange(GL_PIXEL_UNPACK_BUFFER, 0, structOverlayChannel.src_width * structOverlayChannel.src_height * osdInternalTextureBPC, GL_MAP_WRITE_BIT);
-      if (ptr)
-      {
-        memcpy(ptr, osdPixels, structOverlayChannel.src_width * structOverlayChannel.src_height * osdInternalTextureBPC);
-        glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
-      }
-      else
-        MessageBox(NULL,"Failed to map osd buffer","glMapBufferRange",MB_OK);
-
-      glTexSubImage2D(TEXTURE_TARGET,0,0,0,structOverlayChannel.src_width,structOverlayChannel.src_height,osdExternalTextureFormat,osdPixelType, nullptr);
-
-      glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-#else
-      glTexSubImage2D(TEXTURE_TARGET,0,0,0,structOverlayChannel.src_width,structOverlayChannel.src_height,osdExternalTextureFormat,osdPixelType, osdPixels);
-#endif
+      UploadChannelTexture(videoTexInfo.osdTexPBO, structOverlayChannel.src_width, structOverlayChannel.src_height, osdInternalTextureBPC, osdExternalTextureFormat, osdPixelType, osdPixels);
     }
 
     if(bUseSeparateThread) gfx_lock.unlock();
