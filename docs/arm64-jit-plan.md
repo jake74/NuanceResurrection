@@ -565,6 +565,17 @@ With the cap the game holds 30 throughout level one, with the rendering
 MPEs at about two thirds of their allowance. Jake has also confirmed that
 pause works with the emulation thread.
 
+### Upstream (2026-11-15)
+
+Upstream is `andkrau/NuanceResurrection`. Pull request #86 offers four fixes
+to the original code from the branch `upstream-fixes`: the `butt` emitter,
+the three `mul_sv >>svshift` emitters, the uninitialised decode scratch and
+the libretro audio pacing. It is left open as it is. Nothing further is to
+be sent upstream for now, since upstream may not accept AI-assisted
+changes. Not submitted: the macOS drawing fixes with the Arm64 code-buffer
+allocation, the disc read-ahead, and the two new options (MPE speed limit,
+`[MaxFrameRate]`).
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along
