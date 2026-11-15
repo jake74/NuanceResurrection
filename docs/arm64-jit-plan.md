@@ -513,6 +513,16 @@ drawn, so overclocking to 60 would also speed the game up.
 frame count. The reads turned out to be music streaming, on the clock, and
 the length of an unattended game varies too much to serve as a landmark.
 
+### A frame rate cap (2026-11-15)
+
+`[MaxFrameRate]` in `nuance.cfg` (or `NUANCE_MAX_FPS`) makes each game frame
+last a minimum number of 60 Hz fields: 30 gives two. It acts in `VidSync`,
+which Tempest 3000 calls once per frame without asking to wait; MPE3 is
+stalled until the field arrives, as for a wait the game asks for itself. It
+is a cap, not a lock: a frame that takes longer than two fields is not held
+further, so level one averages about 26 frames a second with a cap of 30.
+Disabled in the repository's `nuance.cfg`.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

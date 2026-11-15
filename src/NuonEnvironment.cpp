@@ -584,6 +584,12 @@ void NuonEnvironment::Init()
   if(const char * const a64Jit = getenv("NUANCE_ARM64_JIT"))
     compilerOptions.bArm64NativeCode = (atoi(a64Jit) != 0);
 #endif
+  // NUANCE_MAX_FPS=<frames per second> overrides [MaxFrameRate]; 0 removes the limit.
+  if(const char * const maxFps = getenv("NUANCE_MAX_FPS"))
+  {
+    const int fps = atoi(maxFps);
+    minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
+  }
 
   if (debugLogFile)
   {
@@ -854,6 +860,12 @@ bool NuonEnvironment::SaveConfigFile(const char* const fileName)
   fprintf_s(configFile, "[CompilerConstantPropagation]\n");
   fprintf_s(configFile, "%s\n\n", compilerOptions.bConstantPropagation ? "Enabled" : "Disabled");
 
+  fprintf_s(configFile, "[MaxFrameRate]\n");
+  if(minFieldsPerFrame)
+    fprintf_s(configFile, "%u\n\n", 60 / minFieldsPerFrame);
+  else
+    fprintf_s(configFile, "Disabled\n\n");
+
   fprintf_s(configFile, "[MPE3PacketHack]\n");
   fprintf_s(configFile, "%s\n\n", compilerOptions.bMPE3PacketHack ? (compilerOptions.bMPE3PacketHack == 2 ? "T3K" : "Enabled") : "Disabled");
 
@@ -1023,6 +1035,12 @@ bool NuonEnvironment::LoadConfigFile(const std::string& fileName)
         {
           tokenType = ReadConfigLine(configFile,line);
           compilerOptions.bConstantPropagation = !_stricmp(line,"Enabled");
+        }
+        else if(_strnicmp(&line[1],"MaxFrameRate]",sizeof("MaxFrameRate]")) == 0)
+        {
+          tokenType = ReadConfigLine(configFile,line);
+          const int fps = atoi(line); // "Disabled" reads as 0
+          minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
         }
         else if(_strnicmp(&line[1],"MPE3PacketHack]",sizeof("MPE3PacketHack]")) == 0)
         {

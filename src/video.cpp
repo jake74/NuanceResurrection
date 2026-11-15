@@ -1495,6 +1495,21 @@ void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] field
     fieldCounter += (int)mpe.regs[0];             // fast forward the passed vsyncs to be able to finish up this call here
     nuonEnv.MPE3wait_fieldCounter = fieldCounter; // but actually stall MPE3 emu in the main cycle loop
   }
+  else if(nuonEnv.minFieldsPerFrame && (mpe.mpeIndex == 3) && ((int)mpe.regs[0] != -2))
+  {
+    // [MaxFrameRate]: a game that only asks for the field counter once per
+    // frame and never waits (Tempest 3000) draws as fast as the MPEs allow,
+    // and plays faster when it draws faster. Make each frame last at least
+    // minFieldsPerFrame fields, the same way a requested wait is honoured.
+    static uint32 lastFrameField = 0;
+    const uint32 earliest = lastFrameField + nuonEnv.minFieldsPerFrame;
+    if(lastFrameField && (fieldCounter >= lastFrameField) && (fieldCounter < earliest))
+    {
+      fieldCounter = earliest;
+      nuonEnv.MPE3wait_fieldCounter = fieldCounter;
+    }
+    lastFrameField = fieldCounter;
+  }
 
   mpe.regs[0] = fieldCounter;
 }
