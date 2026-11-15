@@ -123,6 +123,23 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
   Traced at quarter, half and full stick and through a reversal: about 0.7,
   5 and 28 lanes a second, no backward steps.
 
+  With a spinner connected, Tempest 3000 ignores the d-pad on the
+  level-select and name-entry screens (seen on level select: the same
+  d-pad presses change the level in d-pad-only mode and do nothing with a
+  spinner present). Jake could not enter his initials. The spinner is now
+  presented only while it is turning (stick deflected, flywheel coasting or
+  mouse moving, plus a quarter of a second), by rewriting the controller's
+  property word without the "changed" bit, which the game accepts without
+  its controller-changed screen. Pressing the d-pad stops the flywheel and
+  removes the spinner at once. Checked: d-pad changes the level again in
+  stick mode; stick and d-pad both move the claw in play; a d-pad press
+  during full stick takes over. Not solved: on the name-entry screen the
+  stick still acts as a spinner, where one count is a letter, so the d-pad
+  is the way to enter initials. Telling that screen from play would need a
+  state variable; a search (`NUANCE_T3K_STATE`, `NUANCE_T3K_DUMP_ON_SCORE`,
+  which capture memory when a score goes on the table) found none that is
+  clearly right.
+
   The game's own analog-stick mode (`CTRLR_ANALOG1`) is not usable for
   Tempest 3000: with it the buttons did not respond at the title screen.
 - **Controller message:** done. Tempest 3000 opens with "your controller

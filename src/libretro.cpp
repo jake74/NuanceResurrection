@@ -405,6 +405,7 @@ static double mouseOwed = 0.0;          // mouse movement since the last game fr
 static double turnOwed = 0.0;           // counts turned but not yet handed to the game
 static double spinnerCount = 0.0;       // the game sees the low 8 bits
 static unsigned turnGameFrame = 0;
+static int spinnerIdleFrames = 1000;    // 60 Hz frames since the stick, flywheel and mouse were last moving
 
 static void ApplyAnalogControls()
 {
@@ -453,8 +454,38 @@ static void ApplyAnalogControls()
             flywheelSpeed = 0.0f;
     }
 
+    // The spinner is only "plugged in" while it is being turned. With a
+    // spinner present the game takes it and ignores the d-pad on some screens
+    // (choosing the starting level, entering a name for the high-score table),
+    // so a controller that always showed one made those screens unusable from
+    // the d-pad. The game looks at what the controller has every time it reads
+    // it, so the spinner can come and go without the game's "controller
+    // configuration has changed" screen. It stays for a quarter of a second
+    // after the flywheel stops, so that it does not flicker in and out.
+    const float mouseNow = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X) * 0.25f * spinnerSensitivity * spinnerDirection;
+    // The d-pad wins: pressing left or right on it stops the flywheel dead and
+    // takes the spinner away at once, so the d-pad is in charge on every screen.
+    const bool bDpadHeld = (SwapBytes(controller[1].buttons) & (CTRLR_DPAD_LEFT | CTRLR_DPAD_RIGHT | CTRLR_DPAD_UP | CTRLR_DPAD_DOWN)) != 0;
+    if (bDpadHeld) {
+        flywheelSpeed = 0.0f;
+        turnOwed = 0.0;
+        mouseOwed = 0.0;
+        spinnerIdleFrames = 1000;
+    } else if (drive != 0.0f || flywheelSpeed != 0.0f || mouseNow != 0.0f)
+        spinnerIdleFrames = 0;
+    else if (spinnerIdleFrames < 1000)
+        spinnerIdleFrames++;
+    const bool bSpinnerPresent = spinnerIdleFrames < 15;
+    {
+        const uint32 config = SwapBytes(controller[1].config);
+        if (!(config & CONTROLLER_CHANGED_BIT)) { // not while the game has yet to notice the controller at all
+            const uint32 wanted = (uint32)CONTROLLER_STATUS_BIT | KEYBOARD_JOYSTICK_PROPERTIES | (bSpinnerPresent ? CTRLR_QUADSPINNER1 : 0);
+            if (config != wanted) controller[1].config = SwapBytes(wanted);
+        }
+    }
+
     // Mouse or trackpad: straight onto the knob, no flywheel of ours.
-    mouseOwed += input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X) * 0.25 * spinnerSensitivity * spinnerDirection;
+    mouseOwed += mouseNow;
 
     if (perfVidSyncTotal != turnGameFrame) {
         turnGameFrame = perfVidSyncTotal;
@@ -1207,6 +1238,45 @@ void retro_run(void)
         // NUANCE_T3K_TRACE=<from>,<to>: log the claw's position (in thousandths of a lane, from the game's own
         // variable) once per game frame
         // between those game frames, with what the controller was showing.
+        // NUANCE_T3K_STATE=1: every 60 game frames, a line of values that may tell
+        // which screen the game is on (a study aid; see docs).
+        static const bool bState = getenv("NUANCE_T3K_STATE") != nullptr;
+        static unsigned stateLast = 0;
+        if (bState && perfVidSyncTotal >= stateLast + 60) {
+            stateLast = perfVidSyncTotal;
+            auto word = [](uint32 address) { return SwapBytes(*(uint32*)&nuonEnv.systemBusDRAM[address & SYSTEM_BUS_VALID_MEMORY_MASK]); };
+            char name[9] = {};
+            memcpy(name, &nuonEnv.systemBusDRAM[0x8069E82CU & SYSTEM_BUS_VALID_MEMORY_MASK], 8);
+            for (char& ch : name) if (ch && (ch < 32 || ch > 126)) ch = '?';
+            log_printf("libretro: t3k state: frame %u a=%X b=%X top=%u low=%u lane=%X name='%s'\n", stateLast,
+                word(0x800DC0F0U), word(0x8010B038U), word(0x80113420U), word(0x8011343CU), word(0x800DC100U), name);
+        }
+        // NUANCE_T3K_DUMP_ON_SCORE=<prefix>: when a new score goes on the table,
+        // write memory 120 and 300 game frames later (<prefix>-entry1.ram, -entry2.ram).
+        static const char* const dumpOnScore = getenv("NUANCE_T3K_DUMP_ON_SCORE");
+        if (dumpOnScore) {
+            static uint32 lastLow = 0;
+            static unsigned dumpAt[2] = { 0, 0 };
+            const uint32 low = SwapBytes(*(uint32*)&nuonEnv.systemBusDRAM[0x8011343CU & SYSTEM_BUS_VALID_MEMORY_MASK]);
+            if (lastLow && low != lastLow && !dumpAt[0] && !dumpAt[1]) {
+                dumpAt[0] = perfVidSyncTotal + 120; dumpAt[1] = perfVidSyncTotal + 300;
+                log_printf("libretro: t3k state: score table changed at frame %u\n", perfVidSyncTotal);
+            }
+            lastLow = low;
+            for (int k = 0; k < 2; k++) {
+                if (dumpAt[k] && perfVidSyncTotal >= dumpAt[k]) {
+                    dumpAt[k] = 0;
+                    const bool bHeld = HoldEmuThread();
+                    if (FILE* const r = fopen((std::string(dumpOnScore) + (k ? "-entry2.ram" : "-entry1.ram")).c_str(), "wb")) {
+                        fwrite(nuonEnv.mainBusDRAM, 1, MAIN_BUS_SIZE, r);
+                        fwrite(nuonEnv.systemBusDRAM, 1, SYSTEM_BUS_SIZE, r);
+                        fclose(r);
+                    }
+                    if (bHeld) ReleaseEmuThread();
+                    if (k == 1) lastLow = 0;
+                }
+            }
+        }
         static const char* const traceSpec = getenv("NUANCE_T3K_TRACE");
         static unsigned traceLast = 0;
         if (traceSpec && controller && perfVidSyncTotal != traceLast) {
