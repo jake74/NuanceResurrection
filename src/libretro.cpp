@@ -486,6 +486,9 @@ void retro_run(void)
     // each MPE executed per second of wall time. The one number that says how
     // fast the CPU emulation is, whatever the game happens to be drawing.
     static const bool perf_enabled = getenv("NUANCE_PERF") != nullptr;
+#ifdef USE_A64_JIT
+    a64PerfSampleInterpreted = perf_enabled;
+#endif
     static uint64 perf_packets[4] = {};
     static uint64 perf_last_time = useconds_since_start();
     static unsigned perf_frames = 0;
@@ -513,6 +516,17 @@ void retro_run(void)
             char stats[1024];
             A64_FormatStats(stats, sizeof(stats));
             log_printf("libretro: perf: Arm64 JIT %s\n", stats);
+            {
+                A64InterpretedPacket top[12];
+                const unsigned n = A64_TopInterpretedPackets(top, 12);
+                for (unsigned k = 0; k < n; k++) {
+                    char text[1024];
+                    nuonEnv.mpe[top[k].mpeIndex].PrintInstructionCachePacket(text, sizeof(text), top[k].address);
+                    for (char* c = text; *c; c++) if (*c == '\n' || *c == '\r' || *c == '\t') *c = ' ';
+                    log_printf("libretro: perf: interpreted %.0f/s MPE%u %08X%s: %s\n", top[k].count * 16 / secs, top[k].mpeIndex, top[k].address,
+                        (top[k].packetInfo & PACKETINFO_NEVERCOMPILE) ? " (never compiled)" : "", text);
+                }
+            }
             for (int i = 0; i < 4; i++) {
                 log_printf("libretro: perf: MPE%d per second: %.0f native blocks (%.1f packets each), %.0f packets interpreted, %.0f of them never compilable\n", i,
                     a64PerfNativeBlocks[i] / secs,

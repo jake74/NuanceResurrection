@@ -324,6 +324,37 @@ Emitter bugs the test found, present on x86 too and fixed here:
   access. The first of these is the next candidate, and needs care: the
   rules for a branch inside a delay slot are subtle.
 
+### Merlin Racing, and what did not work (2026-11-15)
+
+- Merlin Racing has been played on the JIT and runs correctly, but a little
+  slow. In its demo it swaps display buffers about 41 times a second
+  (`VidChangeBase` in the perf log); MPE1 and MPE2 run at about 35 million
+  packets a second and MPE3 at 8.5 million. Sound is delivered in full.
+- `NUANCE_PERF=1` now also lists the packets the interpreter runs most often,
+  with their disassembly.
+- Three changes were tried on top of chaining and backed out, because they
+  made both games slower by 3-9% although they raised the packet count:
+  - Recompiling a packet whose block is missing under the current overlay.
+    Packets shared between overlays keep their "compiled" flag when the
+    overlay changes and are then interpreted for good; in Merlin Racing that
+    is MPE1 and MPE2's wait loops, about 350,000 packets a second each.
+    Compiling them doubled those MPEs' packet rate and lowered the frame
+    rate, because a waiting MPE then spends longer in each scheduler step.
+  - Not chaining a block into itself, and sitting out scheduler steps while
+    in a loop that changes no register. Both recovered part of that loss but
+    not all of it.
+  - Scheduling the MPEs to equal packet counts, as hardware would. Tempest
+    3000 dropped from about 12.5 to 8.6 `VidSync` calls a second: it gave
+    MPE3's waiting as much host time as the others' drawing.
+- The narrow `[MPE3PacketHack] T3K` setting gives Merlin Racing about 8%
+  (44 buffer swaps a second against 41). The default is left as it is.
+- What these have in common: the four MPEs share one host thread, and an MPE
+  that is waiting for another costs host time that hardware would not charge.
+  More native code does not help once the busy MPEs are already native. The
+  real gains from here are in running the MPEs on separate host threads, or
+  in a scheduler that recognises a waiting MPE reliably. Both are projects of
+  their own, with timing between MPEs as the risk.
+
 Testing aids added along the way, all environment variables:
 `NUANCE_A64_WATCHDOG=1` reports where the emulation is if frames stop for five
 seconds, `NUANCE_AUTOPRESS=<frames>` presses START periodically so an

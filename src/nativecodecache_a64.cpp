@@ -1801,6 +1801,55 @@ volatile unsigned a64DebugBlockRunning = 0;
 unsigned a64ChainPackets = 32;
 unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4];
 
+// --- Which packets the interpreter still runs ---
+
+bool a64PerfSampleInterpreted = false;
+
+namespace {
+
+constexpr unsigned kInterpTableSize = 4096; // open addressing, power of two
+A64InterpretedPacket g_interpTable[kInterpTableSize];
+
+} // namespace
+
+void A64_NoteInterpretedPacket(const unsigned mpeIndex, const unsigned address, const unsigned packetInfo)
+{
+  unsigned slot = ((address >> 1) * 2654435761u + mpeIndex) & (kInterpTableSize - 1);
+  for(unsigned probe = 0; probe < 16; probe++, slot = (slot + 1) & (kInterpTableSize - 1))
+  {
+    A64InterpretedPacket &entry = g_interpTable[slot];
+    if(entry.count && (entry.address != address || entry.mpeIndex != mpeIndex))
+      continue;
+    entry.mpeIndex = mpeIndex;
+    entry.address = address;
+    entry.packetInfo = packetInfo;
+    entry.count++;
+    return;
+  }
+  // Table crowded around here: the packet goes uncounted, which only matters
+  // for ones too rare to make the list anyway.
+}
+
+unsigned A64_TopInterpretedPackets(A64InterpretedPacket * const out, const unsigned maxEntries)
+{
+  unsigned found = 0;
+  for(; found < maxEntries; found++)
+  {
+    unsigned best = kInterpTableSize;
+    for(unsigned i = 0; i < kInterpTableSize; i++)
+    {
+      if(g_interpTable[i].count && (best == kInterpTableSize || g_interpTable[i].count > g_interpTable[best].count))
+        best = i;
+    }
+    if(best == kInterpTableSize)
+      break;
+    out[found] = g_interpTable[best];
+    g_interpTable[best].count = 0;
+  }
+  memset(g_interpTable, 0, sizeof(g_interpTable));
+  return found;
+}
+
 // --- Statistics ---
 
 namespace {

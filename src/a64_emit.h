@@ -50,6 +50,14 @@ extern unsigned a64ChainPackets;
 // packets interpreted, and how many of those were marked never to be compiled.
 extern unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4];
 
+// With a64PerfSampleInterpreted set (NUANCE_PERF does), the dispatcher reports
+// every packet it interprets and A64_TopInterpretedPackets lists the addresses
+// seen most since the last call: what to teach the block compiler next.
+extern bool a64PerfSampleInterpreted;
+void A64_NoteInterpretedPacket(unsigned mpeIndex, unsigned address, unsigned packetInfo);
+struct A64InterpretedPacket { unsigned mpeIndex, address, packetInfo; unsigned long long count; };
+unsigned A64_TopInterpretedPackets(A64InterpretedPacket *out, unsigned maxEntries);
+
 // Differential test against the interpreter (a64_difftest.cpp).
 void A64_DiffTest(unsigned trials, unsigned seed);
 

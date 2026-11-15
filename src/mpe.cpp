@@ -2227,6 +2227,9 @@ bool MPE::FetchDecodeExecute()
         a64PerfInterpreted[mpeIndex & 3]++;
         if(pInstructionCacheEntry->packetInfo & PACKETINFO_NEVERCOMPILE)
           a64PerfNeverCompile[mpeIndex & 3]++;
+        // One in sixteen, so that looking does not slow down what is being looked at.
+        if(a64PerfSampleInterpreted && ((a64PerfInterpreted[mpeIndex & 3] & 15) == 0))
+          A64_NoteInterpretedPacket(mpeIndex, pcexec, pInstructionCacheEntry->packetInfo);
 #endif
 
         //prevPcexec = pcexec;
