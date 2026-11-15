@@ -11,8 +11,13 @@
     #define COMPILE_TYPE SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_BLOCK
     #define ALLOW_NATIVE_CODE_EMIT false
   #endif
+#elif defined(USE_A64_JIT)
+  // Arm64 native emitter (nativecodecache_a64.cpp). Still being filled in, so
+  // it is a runtime choice and off by default: CompilerOptions::bArm64NativeCode.
+  #define COMPILE_TYPE SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_NATIVE_CODE_BLOCK
+  #define ALLOW_NATIVE_CODE_EMIT (nuonEnv.compilerOptions.bArm64NativeCode)
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__)
-  // No native code emitter exists for ARM yet, so always run the IL interpreter.
+  // No native code emitter in this build, so always run the IL interpreter.
   #define COMPILE_TYPE SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_BLOCK
   #define ALLOW_NATIVE_CODE_EMIT false
 #else

@@ -562,6 +562,13 @@ void NuonEnvironment::Init()
 
   LoadConfigFile(cfgFileName);
 
+#ifdef USE_A64_JIT
+  // The environment wins over nuance.cfg, so the emitter can be tried without
+  // editing the file: NUANCE_ARM64_JIT=1 switches it on, =0 off.
+  if(const char * const a64Jit = getenv("NUANCE_ARM64_JIT"))
+    compilerOptions.bArm64NativeCode = (atoi(a64Jit) != 0);
+#endif
+
   if (debugLogFile)
   {
     fclose(debugLogFile);
@@ -815,6 +822,11 @@ bool NuonEnvironment::SaveConfigFile(const char* const fileName)
   fprintf_s(configFile, "[DynamicCompiler]\n");
   fprintf_s(configFile, "%s\n\n", compilerOptions.bAllowCompile ? "Enabled" : "Disabled");
 
+#ifdef USE_A64_JIT
+  fprintf_s(configFile, "[Arm64NativeCode]\n");
+  fprintf_s(configFile, "%s\n\n", compilerOptions.bArm64NativeCode ? "Enabled" : "Disabled");
+#endif
+
 #ifdef ENABLE_EMULATION_MESSAGEBOXES
   fprintf_s(configFile, "[DumpCompiledBlocks]\n");
   fprintf_s(configFile, "%s\n\n", compilerOptions.bDumpBlocks ? "Enabled" : "Disabled");
@@ -973,6 +985,11 @@ bool NuonEnvironment::LoadConfigFile(const std::string& fileName)
         {
           tokenType = ReadConfigLine(configFile,line);
           compilerOptions.bAllowCompile = !_stricmp(line,"Enabled");
+        }
+        else if(_strnicmp(&line[1],"Arm64NativeCode]",sizeof("Arm64NativeCode]")) == 0)
+        {
+          tokenType = ReadConfigLine(configFile,line);
+          compilerOptions.bArm64NativeCode = !_stricmp(line,"Enabled");
         }
 #ifdef ENABLE_EMULATION_MESSAGEBOXES
         else if(_strnicmp(&line[1],"DumpCompiledBlocks]",sizeof("DumpCompiledBlocks]")) == 0)

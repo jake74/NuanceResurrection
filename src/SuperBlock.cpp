@@ -376,6 +376,8 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
 
 #ifdef USE_ASMJIT
     codeCache.AsmJit_BeginBlock();
+#elif defined(USE_A64_JIT)
+    codeCache.A64_BeginBlock();
 #endif
 
     if(numInstructions > 0)
@@ -449,6 +451,16 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
 
 #ifdef USE_ASMJIT
     const uint32 emittedBytes = codeCache.AsmJit_EndBlock();
+#elif defined(USE_A64_JIT)
+    const uint32 emittedBytes = codeCache.A64_EndBlock();
+    A64_NoteBlock(codeCache.A64_Failure(), codeCache.A64_FailReason());
+    if(!emittedBytes)
+    {
+      // Nothing was written to the code buffer. CompileBlock turns this into
+      // "interpret this packet" or "flush and try again".
+      a64EmitFailure = codeCache.A64_Failure();
+      return false;
+    }
 #else
     const uint32 emittedBytes = (uint32)(codeCache.GetEmitPointer() - entryPoint);
 #endif
@@ -462,6 +474,8 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
 NativeCodeCacheEntryPoint SuperBlock::CompileBlock(const uint32 address, NativeCodeCache &codeCache, bool &bError)
 {
   const NativeCodeCacheEntryPoint entryPoint = (NativeCodeCacheEntryPoint)codeCache.GetEmitPointer();
+  // Both kinds of block are written straight into the code buffer.
+  const NativeCodeCache::WriteScope writeScope(codeCache);
   bCanEmitNativeCode = true;
   bool bContainsBranch = false;
 
@@ -498,6 +512,19 @@ NativeCodeCacheEntryPoint SuperBlock::CompileBlock(const uint32 address, NativeC
     return (NativeCodeCacheEntryPoint)0;
   }
 
+#ifdef USE_A64_JIT
+  // On Arm64 a block is native or it is not a block: one that cannot be emitted
+  // natively is left to the interpreter, packet by packet, rather than turned
+  // into an IL block (see CompilerOptions::CanCompile).
+  if(!bCanEmitNativeCode)
+  {
+    A64_NoteBlock(A64_EMIT_UNSUPPORTED, "packet not native-compilable");
+    bError = true;
+    return (NativeCodeCacheEntryPoint)-1;
+  }
+  a64EmitFailure = A64_EMIT_OK;
+#endif
+
   UpdateDependencyInfo();
 
   if(!COMPILE_SINGLE_PACKET)
@@ -521,6 +548,13 @@ NativeCodeCacheEntryPoint SuperBlock::CompileBlock(const uint32 address, NativeC
   //update code cache entry fields appropriately
   if(!EmitCodeBlock(codeCache, bContainsBranch))
   {
+#ifdef USE_A64_JIT
+    if(a64EmitFailure)
+    {
+      bError = true;
+      return (NativeCodeCacheEntryPoint)((a64EmitFailure == A64_EMIT_NO_ROOM) ? 0 : -1);
+    }
+#endif
     return entryPoint;
   }
   else
@@ -909,6 +943,9 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
 {
   uint32 decodeOptions = (DECOMPRESS_OPTIONS_SCHEDULE_ECU_LAST | DECOMPRESS_OPTIONS_SCHEDULE_MEM_FIRST);
   bCanEmitNativeCode = ALLOW_NATIVE_CODE_EMIT;
+#ifdef USE_A64_JIT
+  bCanEmitNativeCode = bCanEmitNativeCode && pMPE->nativeCodeCache.IsExecutable();
+#endif
   bool bFirstNonNOPReached = false;
   constexpr bool bForceILBlock = false; // forced to false for now, see disabled enablement/comments below
 

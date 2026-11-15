@@ -5,6 +5,17 @@
 #include "NativeCodeCache.h"
 #include "PageMap.h"
 
+// Apple Silicon refuses a writable+executable mapping unless it is MAP_JIT, and
+// then lets a thread either write to it or execute from it, never both. Only
+// macOS has the call that flips between the two (iOS and tvOS allow no JIT).
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <pthread.h>
+#define NUANCE_APPLE_MAP_JIT
+#endif
+#endif
+
 #define x86Emit_MRM(mod,reg,rm) (*pEmitLoc++ = (((uint32)(mod) << 6) | ((uint32)(reg) << 3) | (uint32)(rm)))
 #define x86Emit_SIB(base, scale, index) (*pEmitLoc++ = (((uint32)(scale) << 6) | ((uint32)(index) << 3) | (base)))
 
@@ -24,7 +35,34 @@ NativeCodeCache::NativeCodeCache(uint32 _numBytes/*, uint32 _desiredTLBEntries*/
 
 void NativeCodeCache::Init()
 {
-  ptrNativeCodeBuffer = (uint8 *)VirtualAlloc(NULL,numBytes,MEM_RESERVE | MEM_COMMIT,PAGE_EXECUTE_READWRITE/*PAGE_READWRITE*/); //!! pages are f.e. 64k wide, so this does not work
+  ptrNativeCodeBuffer = nullptr;
+  bExecutable = true;
+  bJitWriteProtect = false;
+
+#ifdef NUANCE_APPLE_MAP_JIT
+  {
+    void * const p = mmap(NULL,numBytes,PROT_READ | PROT_WRITE | PROT_EXEC,MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT,-1,0);
+    if(p != MAP_FAILED)
+    {
+      ptrNativeCodeBuffer = (uint8 *)p;
+      bJitWriteProtect = true;
+    }
+  }
+#endif
+
+  if(!ptrNativeCodeBuffer)
+    ptrNativeCodeBuffer = (uint8 *)VirtualAlloc(NULL,numBytes,MEM_RESERVE | MEM_COMMIT,PAGE_EXECUTE_READWRITE/*PAGE_READWRITE*/); //!! pages are f.e. 64k wide, so this does not work
+
+  if(!ptrNativeCodeBuffer)
+  {
+    // No executable memory to be had (a hardened platform, or one without JIT
+    // rights). The buffer also holds the IL blocks, which are plain data, so a
+    // read/write mapping keeps block compilation working - without it every hot
+    // packet would retry the compile, fail for lack of room and flush the cache.
+    ptrNativeCodeBuffer = (uint8 *)VirtualAlloc(NULL,numBytes,MEM_RESERVE | MEM_COMMIT,PAGE_READWRITE);
+    bExecutable = false;
+  }
+
   pEmitLoc = ptrNativeCodeBuffer;
 
   if(ptrNativeCodeBuffer)
@@ -43,10 +81,28 @@ void NativeCodeCache::Init()
 
 NativeCodeCache::~NativeCodeCache()
 {
+#ifdef USE_A64_JIT
+  A64_AbortBlock();
+#endif
+
   if(ptrNativeCodeBuffer)
   {
+#ifdef _WIN32
     VirtualFree(ptrNativeCodeBuffer,0,MEM_RELEASE);
+#else
+    // Not through the VirtualFree shim: it has no size to go by and unmaps a
+    // fixed 64 MB, which is more than this mapping ever was.
+    munmap(ptrNativeCodeBuffer,numBytes);
+#endif
   }
+}
+
+void NativeCodeCache::SetWritable(const bool bWritable)
+{
+#ifdef NUANCE_APPLE_MAP_JIT
+  if(bJitWriteProtect)
+    pthread_jit_write_protect_np(bWritable ? 0 : 1);
+#endif
 }
 
 bool NativeCodeCache::ReleaseBuffer(NativeCodeCacheEntryPoint entryPoint, uint32 virtualAddress, uint32 nextVirtualAddress, uint32 newUsedBytes, uint32 packetCount, uint32 instructionCount, SuperBlockCompileType compileType, uint32 nextDelayCount, uint32 alignment)
@@ -102,6 +158,10 @@ void NativeCodeCache::Flush()
   }*/
   FlushInstructionCache(GetCurrentProcess(), pEmitLoc, numBytes); //!! should not be necessary, as each code block is flushed independently below in ReleaseBuffer(), but do it in case that ReleaseBuffer() is not the only thing called after emitting code
 }
+
+// Everything from here on emits x86 machine code. The Arm64 build gets its own
+// bodies for these primitives from nativecodecache_a64.cpp.
+#ifndef USE_A64_JIT
 
 void NativeCodeCache::X86Emit_ModRegRM(const x86ModType modType, const x86ModReg regSpare, const uintptr_t base, const x86IndexReg index, const x86ScaleVal scale, const int32 disp)
 {
@@ -4978,3 +5038,5 @@ void NativeCodeCache::X86Emit_MOVIR_Ptr(const uintptr_t addr, const x86Reg regDe
   // On 32-bit, MOVIR with the 32-bit immediate is correct (host pointers fit).
   X86Emit_MOVIR((int32)addr, regDest);
 }
+
+#endif // !USE_A64_JIT

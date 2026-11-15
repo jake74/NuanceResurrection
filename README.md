@@ -91,10 +91,13 @@ Use a universal RetroArch build (Homebrew: `brew install --cask retroarch-metal`
 the plain `retroarch` cask is Intel-only. Then Load Core -> "VM Labs - NUON (Nuance)"
 and Load Content.
 
-On Arm64 the core is interpreter-only, because the dynamic recompiler emits x86
-code. Simple content runs at full speed, but demanding games do not (Tempest 3000
-manages about 5 fps on an M4 Pro). The plan for an Arm64 JIT backend is in
-[docs/arm64-jit-plan.md](docs/arm64-jit-plan.md).
+On Arm64 the core interprets every packet, because the dynamic recompiler emits
+x86 code. Simple content runs at full speed, but demanding games do not (Tempest
+3000 manages about 5 fps on an M4 Pro). An Arm64 JIT backend is being built, see
+[docs/arm64-jit-plan.md](docs/arm64-jit-plan.md). It is compiled in but
+incomplete and off by default; `[Arm64NativeCode]` in `nuance.cfg` or
+`NUANCE_ARM64_JIT=1` in the environment switches it on, and `NUANCE_PERF=1` logs
+emulation speed and what the backend could not compile.
 
 ## Project structure
 

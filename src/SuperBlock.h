@@ -26,11 +26,14 @@ public:
   #else
     bAllowCompile = false; // 'old' JIT cannot emit 64bit-, only 32bit-x86 code
   #endif
+#elif defined(USE_A64_JIT)
+    bAllowCompile = true; // only takes effect together with bArm64NativeCode, see CanCompile()
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__)
-    bAllowCompile = false; // no ARM native emitter yet: interpreter only
+    bAllowCompile = false; // no ARM native emitter in this build: interpreter only
 #else
     bAllowCompile = true;
 #endif
+    bArm64NativeCode = false;
 #ifdef ENABLE_EMULATION_MESSAGEBOXES
     bDumpBlocks = false;
 #endif
@@ -40,6 +43,25 @@ public:
   bool bConstantPropagation;
   bool bDeadCodeElimination;
   bool bAllowCompile;
+  // Arm64 only: use the native code emitter. Experimental and off by default;
+  // [Arm64NativeCode] in nuance.cfg or NUANCE_ARM64_JIT=1 in the environment.
+  bool bArm64NativeCode;
+
+  // Whether packets may be compiled into blocks at all. On Arm that takes the
+  // native emitter: a build without it, or with it switched off, interprets
+  // every packet whatever [DynamicCompiler] says. Blocks made only of IL nodes
+  // are not an option there - Tempest 3000 does not survive its boot on them.
+  bool CanCompile() const
+  {
+#if defined(USE_A64_JIT)
+    return bAllowCompile && bArm64NativeCode;
+#elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__)
+    return false;
+#else
+    return bAllowCompile;
+#endif
+  }
+
 #ifdef ENABLE_EMULATION_MESSAGEBOXES
   bool bDumpBlocks;
 #endif
@@ -85,6 +107,9 @@ private:
   uint32 exitAddress;
   uint32 nextDelayCounter;
   bool bCanEmitNativeCode;
+#ifdef USE_A64_JIT
+  uint32 a64EmitFailure; // A64_EMIT_*: set by EmitCodeBlock when the native block could not be emitted
+#endif
   static constexpr bool bAllowBlockCompile = (COMPILE_TYPE != SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_SINGLE);
 };
 

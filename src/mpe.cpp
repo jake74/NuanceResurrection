@@ -1629,7 +1629,7 @@ void MPE::DecompressPacket(const uint8 *iBuffer, InstructionCacheEntry &pICacheE
   pICacheEntry.packetInfo = pStruct.packetInfo;
   pICacheEntry.ecuConditionCode = pStruct.ecuConditionCode;
 
-  if(!nuonEnv.compilerOptions.bAllowCompile)
+  if(!nuonEnv.compilerOptions.CanCompile())
   {
     pICacheEntry.packetInfo |= PACKETINFO_NEVERCOMPILE;
   }

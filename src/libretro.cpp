@@ -37,6 +37,7 @@
 #include "timer.h"
 #include "Bios.h"
 #include "archive.h"
+#include "NativeCodeCache.h"
 
 // GLWindow stubs for libretro (no windowing needed)
 #include "GLWindow.h"
@@ -402,6 +403,23 @@ bool retro_load_game(const struct retro_game_info *game)
     nuonEnv.Init();
     log_printf("libretro: nuonEnv.Init() done\n"); fflush(stderr);
 
+#ifdef USE_A64_JIT
+    // The Arm64 emitter is opt-in. When asked for, prove on this machine that
+    // generated code can be written, made executable and run before any game
+    // code depends on it; otherwise stay with the interpreter.
+    if (nuonEnv.compilerOptions.bArm64NativeCode) {
+        char selfTest[256];
+        const bool passed = A64_JitSelfTest(selfTest, sizeof(selfTest));
+        log_printf("libretro: Arm64 JIT self-test: %s\n", selfTest);
+        if (!passed) {
+            nuonEnv.compilerOptions.bArm64NativeCode = false;
+            log_printf("libretro: Arm64 JIT disabled, using the interpreter\n");
+        }
+    } else {
+        log_printf("libretro: Arm64 JIT available but off (set NUANCE_ARM64_JIT=1 or [Arm64NativeCode] to try it)\n");
+    }
+#endif
+
     // Load game
     bool ok = nuonEnv.mpe[3].LoadNuonRomFile(gamePath.c_str());
     if (!ok) ok = nuonEnv.mpe[3].LoadCoffFile(gamePath.c_str());
@@ -443,6 +461,31 @@ void retro_run(void)
     uint16 buttons = GetInputButtons();
     ApplyControllerState(1, buttons);
 
+    // NUANCE_PERF=1 in the environment: every 300 frames, log how many packets
+    // each MPE executed per second of wall time. The one number that says how
+    // fast the CPU emulation is, whatever the game happens to be drawing.
+    static const bool perf_enabled = getenv("NUANCE_PERF") != nullptr;
+    static uint64 perf_packets[4] = {};
+    static uint64 perf_last_time = useconds_since_start();
+    static unsigned perf_frames = 0;
+    if (perf_enabled && ++perf_frames == 300) {
+        const uint64 now = useconds_since_start();
+        const double secs = (double)(now - perf_last_time) / 1e6;
+        log_printf("libretro: perf: packets/s MPE0 %.0f MPE1 %.0f MPE2 %.0f MPE3 %.0f total %.0f\n",
+            perf_packets[0] / secs, perf_packets[1] / secs, perf_packets[2] / secs, perf_packets[3] / secs,
+            (perf_packets[0] + perf_packets[1] + perf_packets[2] + perf_packets[3]) / secs);
+#ifdef USE_A64_JIT
+        if (nuonEnv.compilerOptions.bArm64NativeCode) {
+            char stats[1024];
+            A64_FormatStats(stats, sizeof(stats));
+            log_printf("libretro: perf: Arm64 JIT %s\n", stats);
+        }
+#endif
+        perf_packets[0] = perf_packets[1] = perf_packets[2] = perf_packets[3] = 0;
+        perf_last_time = now;
+        perf_frames = 0;
+    }
+
     // Run emulation until video trigger or real-time budget (~16ms for 60fps)
     nuonEnv.trigger_render_video = false;
     uint32 cycles = 0;
@@ -461,8 +504,10 @@ void retro_run(void)
         cycles++;
 
         for (int i = 3; i >= 0; --i)
-            if (i != 3 || nuonEnv.MPE3wait_fieldCounter == 0)
+            if (i != 3 || nuonEnv.MPE3wait_fieldCounter == 0) {
                 nuonEnv.mpe[i].FetchDecodeExecute();
+                perf_packets[i] += nuonEnv.mpe[i].cycleCounter;
+            }
 
         if (nuonEnv.pendingCommRequests)
             DoCommBusController();

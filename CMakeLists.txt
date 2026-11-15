@@ -86,7 +86,26 @@ message(STATUS "NUANCE_X86_64 (asmjit JIT enabled) = ${NUANCE_X86_64} (processor
 include(CheckCXXCompilerFlag)
 check_cxx_compiler_flag(-mssse3 NUANCE_HAS_MSSSE3)
 
-# asmjit (only used by the 64-bit JIT path; 32-bit keeps the legacy x86 emitter)
+# The Arm64 JIT backend (src/nativecodecache_a64.cpp) implements the emitters'
+# x86-shaped primitives in AArch64 code. Ask the compiler what it targets rather
+# than reading CMAKE_SYSTEM_PROCESSOR, which names the build machine when
+# cross-compiling one macOS slice on the other. iOS and tvOS allow no JIT at all.
+# The backend is compiled in but off at runtime until it is complete: see
+# CompilerOptions::bArm64NativeCode and docs/arm64-jit-plan.md.
+include(CheckCXXSourceCompiles)
+check_cxx_source_compiles("
+#if !defined(__aarch64__)
+#error not aarch64
+#endif
+int main() { return 0; }" NUANCE_TARGET_AARCH64)
+if(NUANCE_TARGET_AARCH64 AND NOT NUANCE_APPLE_MOBILE)
+    option(NUANCE_ARM64_JIT "Build the Arm64 JIT backend" ON)
+else()
+    set(NUANCE_ARM64_JIT OFF)
+endif()
+message(STATUS "NUANCE_ARM64_JIT (Arm64 JIT backend built) = ${NUANCE_ARM64_JIT}")
+
+# asmjit (used by the 64-bit JIT paths; 32-bit x86 keeps the legacy raw-byte emitter)
 if(NUANCE_X86_64)
     file(GLOB_RECURSE ASMJIT_SRC
         external/asmjit/asmjit/core/*.cpp
@@ -97,6 +116,16 @@ if(NUANCE_X86_64)
     add_library(asmjit_static STATIC ${ASMJIT_SRC})
     target_include_directories(asmjit_static PUBLIC external/asmjit)
     target_compile_definitions(asmjit_static PUBLIC ASMJIT_STATIC ASMJIT_NO_AARCH64)
+    set_property(TARGET asmjit_static PROPERTY POSITION_INDEPENDENT_CODE ON)
+elseif(NUANCE_ARM64_JIT)
+    file(GLOB_RECURSE ASMJIT_SRC
+        external/asmjit/asmjit/core/*.cpp
+        external/asmjit/asmjit/arm/*.cpp
+        external/asmjit/asmjit/support/*.cpp
+    )
+    add_library(asmjit_static STATIC ${ASMJIT_SRC})
+    target_include_directories(asmjit_static PUBLIC external/asmjit)
+    target_compile_definitions(asmjit_static PUBLIC ASMJIT_STATIC ASMJIT_NO_X86)
     set_property(TARGET asmjit_static PROPERTY POSITION_INDEPENDENT_CODE ON)
 endif()
 
@@ -198,6 +227,7 @@ set(NUANCE_SOURCES
     src/video.cpp
     $<IF:$<PLATFORM_ID:Windows>,,src/NuanceUI.cpp>
     $<$<BOOL:${NUANCE_X86_64}>:src/asmjit_emit.cpp>
+    $<$<BOOL:${NUANCE_ARM64_JIT}>:src/nativecodecache_a64.cpp>
 )
 
 option(BUILD_LIBRETRO "Build libretro core instead of standalone" OFF)
@@ -260,6 +290,7 @@ target_compile_definitions(${NUANCE_TARGET} PRIVATE
     _CRT_SECURE_NO_WARNINGS
     _LARGEFILE64_SOURCE
     $<$<BOOL:${NUANCE_X86_64}>:USE_ASMJIT>
+    $<$<BOOL:${NUANCE_ARM64_JIT}>:USE_A64_JIT>
     # Tells the sources they are building against OpenGL ES: no loader, no
     # fixed-function matrix stack, and a GLES2 hardware context to ask for.
     $<$<BOOL:${NUANCE_GLES}>:NUANCE_GLES>
@@ -294,7 +325,7 @@ target_link_libraries(${NUANCE_TARGET} PRIVATE
     chdr-static
     miniz
     #murmurhash # unused - see add_library above
-    $<$<BOOL:${NUANCE_X86_64}>:asmjit_static>
+    $<$<OR:$<BOOL:${NUANCE_X86_64}>,$<BOOL:${NUANCE_ARM64_JIT}>>:asmjit_static>
     # Desktop GL through the loader, or GLES2 linked straight in - on Android
     # and iOS the library is part of the platform and there is nothing to load.
     $<$<NOT:$<BOOL:${NUANCE_GLES}>>:OpenGL::GL>

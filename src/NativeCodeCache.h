@@ -9,6 +9,9 @@
 #ifdef USE_ASMJIT
 #include "asmjit_emit.h"
 #endif
+#ifdef USE_A64_JIT
+#include "a64_emit.h"
+#endif
 
 #define DEFAULT_CODE_BUFFER_BYTES (8U*1024U*1024U)
 //#define DEFAULT_NUM_TLB_ENTRIES (16384U)
@@ -20,6 +23,28 @@ public:
   NativeCodeCache(uint32 _numBytes/*, uint32 _desiredTLBEntries*/);
   void Init();
   ~NativeCodeCache();
+
+  // True when the buffer can hold native code. False means it is plain data
+  // memory, good for IL blocks only.
+  bool IsExecutable() const
+  {
+    return bExecutable;
+  }
+
+  // On platforms that let a thread either write to JIT memory or execute it
+  // (Apple Silicon), switches the calling thread between the two. A no-op
+  // everywhere else.
+  void SetWritable(const bool bWritable);
+
+  // Makes the buffer writable for the lifetime of the object.
+  struct WriteScope final
+  {
+    explicit WriteScope(NativeCodeCache &_cache) : cache(_cache) { cache.SetWritable(true); }
+    ~WriteScope() { cache.SetWritable(false); }
+    WriteScope(const WriteScope &) = delete;
+    WriteScope &operator=(const WriteScope &) = delete;
+    NativeCodeCache &cache;
+  };
 
   void Flush();
   void FlushRegion(const uint32 start, const uint32 end)
@@ -94,6 +119,10 @@ public:
       AsmJit_BindLabel(labelIndex);
       return;
     }
+#endif
+#ifdef USE_A64_JIT
+    A64_BindLabel(labelIndex);
+    return;
 #endif
     patchMgr.SetLabelPointer(labelIndex,GetEmitPointer());
   }
@@ -618,11 +647,38 @@ public:
   asmjit::Label& AsmJit_GetLabel(uint32 labelIndex);
 #endif
 
+#ifdef USE_A64_JIT
+  // Arm64 code generation state (nativecodecache_a64.cpp). A block is assembled
+  // into a64Code and only copied into the code buffer by A64_EndBlock, so a
+  // block that fails part-way leaves the buffer untouched.
+  asmjit::CodeHolder* a64Code = nullptr;
+  asmjit::a64::Assembler* a64As = nullptr;
+  asmjit::Label a64Labels[MAX_A64_LABELS];
+  bool a64LabelBound[MAX_A64_LABELS] = {};
+  uint32 a64Failure = A64_EMIT_OK;
+  const char* a64FailReason = nullptr;
+
+  void A64_BeginBlock();
+  // Copies the finished block to the emit pointer and returns its size in
+  // bytes, or 0 if the block failed - A64_Failure() then says why.
+  uint32 A64_EndBlock();
+  void A64_AbortBlock();
+  // Marks the block under construction as one the backend cannot emit.
+  void A64_Unsupported(const char* what);
+  uint32 A64_Failure() const { return a64Failure; }
+  const char* A64_FailReason() const { return a64FailReason; }
+  void A64_BindLabel(uint32 labelIndex);
+  asmjit::Label A64_GetLabel(uint32 labelIndex);
+  asmjit::a64::Mem A64_Mem(uintptr_t base, x86IndexReg index, x86ScaleVal scale, int32 disp, uint32 size);
+#endif
+
 private:
   uint8 *pEmitLoc;
   uint8 *ptrNativeCodeBuffer;
   uint32 warningThreshold;
   uint32 numBytes;
+  bool bExecutable;
+  bool bJitWriteProtect;
   //const uint32 numTLBEntries;
 };
 

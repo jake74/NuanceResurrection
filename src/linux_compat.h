@@ -255,8 +255,11 @@ inline void* VirtualAlloc(void* addr, size_t size, unsigned int, unsigned int pr
     if (prot == PAGE_EXECUTE_READWRITE)
         mprot |= PROT_EXEC;
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-#ifdef MAP_32BIT
-    flags |= MAP_32BIT; // allocate in lower 2GB for 32-bit pointer compatibility
+#if defined(MAP_32BIT) && !defined(__aarch64__)
+    // Allocate in the lower 2GB for 32-bit pointer compatibility. Only the x86
+    // emitters need that, and on arm64 macOS - which defines the flag too - the
+    // low 4GB is unmapped by design, so asking for it fails every time.
+    flags |= MAP_32BIT;
 #endif
     void* p = mmap(addr, size, mprot, flags, -1, 0);
     return (p == MAP_FAILED) ? nullptr : p;

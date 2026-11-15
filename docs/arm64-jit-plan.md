@@ -1,20 +1,20 @@
 # Arm64 JIT backend: plan
 
-Status: proposed, 2026-11-14. Nothing here is implemented yet.
+Status: milestone 1 done (2026-11-14). The backend builds, generated code runs
+on Apple Silicon, and it is off by default. See [Progress](#progress).
 
 ## Goal
 
 Run the dynamic recompiler natively on Arm64, starting with macOS on Apple
 Silicon, so that games stop being interpreter-bound.
 
-Baseline on an M4 Pro (interpreter, libretro core in RetroArch):
+Baseline on an M4 Pro (interpreter, libretro core in RetroArch): Tempest 3000
+runs at about 5 fps and executes roughly 55-58 million packets per second
+across the four MPEs, 13-16 million each. Real hardware runs each MPE at
+54 MHz, so the interpreter delivers about a quarter of real time. The number
+comes from `NUANCE_PERF=1`, which logs packets per second every 300 frames.
 
-| Content | Emulated cycles per 16 ms frame | Result |
-|---|---|---|
-| Bundled test disc (`NUON.CD`) | ~1,850,000 | 60 fps |
-| Tempest 3000 | ~205,000 | ~5 fps |
-
-Tempest 3000 needs roughly 5-10x. About 40% of core CPU time is in
+Tempest 3000 needs roughly 4-5x. About 40% of core CPU time is in
 `MPE::FetchDecodeExecute` (dispatch), the rest spread across `Execute_*`
 handlers, so only compiled blocks can close the gap. Whether this approach
 gets Tempest 3000 all the way to full speed is not known until Milestone 4.
@@ -48,15 +48,31 @@ A native rewrite of the handlers would produce better code but is months of
 work. It can be done later, handler by handler, for whatever the profiler says
 is hot.
 
+A primitive without an Arm64 body fails the block being compiled, and the
+packet the block starts with is left to the interpreter. So the backend can be
+filled in one primitive at a time, every block that does compile is made only
+of primitives that exist, and the core stays usable throughout.
+
+On Arm64 a block is native or it is not a block. The x86 builds turn blocks
+they cannot emit natively into IL blocks (pre-decoded handler lists); Arm64
+does not, because Tempest 3000 fails during boot when every block is an IL
+block (see Progress).
+
 ### Code layout
 
-- New `src/nativecodecache_a64.cpp` holding the Arm64 versions of every
-  `NativeCodeCache::X86Emit_*` method. The x86 bodies in `nativecodecache.cpp`
-  are compiled out on Arm64, so there are no per-primitive `#ifdef`s.
-- New `src/a64_emit.h` for register mapping, memory-operand lowering and the
-  flag tracker (the Arm64 counterpart of `asmjit_emit.h`).
-- `EmitMEM.cpp` uses asmjit x86 directly in four places (`Emit_LoadBankPtr`).
-  Those become a new primitive so handlers stay architecture-neutral.
+- `src/nativecodecache_a64.cpp` holds the Arm64 versions of every
+  `NativeCodeCache::X86Emit_*` method, most of them still one-line
+  "unsupported" stubs. The x86 bodies in `nativecodecache.cpp` are compiled
+  out on Arm64, so there are no per-primitive `#ifdef`s.
+- `src/a64_emit.h` declares the backend's entry points (the Arm64 counterpart
+  of `asmjit_emit.h`).
+- `EmitMEM.cpp` uses asmjit x86 directly in `Emit_LoadBankPtr`. On Arm64 that
+  is marked unsupported for now; it becomes a primitive of its own in
+  milestone 2 so handlers stay architecture-neutral.
+- Build: `NUANCE_ARM64_JIT` (CMake, on by default for AArch64 targets other
+  than iOS/tvOS) defines `USE_A64_JIT`.
+- Runtime: `[Arm64NativeCode]` in `nuance.cfg`, or `NUANCE_ARM64_JIT=1` in the
+  environment. Off by default.
 
 ### Register mapping
 
@@ -123,7 +139,7 @@ back to `w9`.
 
 | # | Deliverable | Done when | Rough effort |
 |---|---|---|---|
-| 1 | Build and plumbing: CMake option, asmjit AArch64 sources, `MAP_JIT` buffer, block prologue/epilogue, labels, `CALLI`, gates in `mpe.h`/`SuperBlock.h` behind a runtime switch | An empty block and a helper-call block execute on the M4; interpreter remains the default | 2-3 days |
+| 1 (done) | Build and plumbing: CMake option, asmjit AArch64 sources, `MAP_JIT` buffer, block prologue/epilogue, labels, `CALLI`, gates in `mpe.h`/`SuperBlock.h` behind a runtime switch | An empty block and a helper-call block execute on the M4; interpreter remains the default | 2-3 days |
 | 2 | Integer primitives without flags: moves, memory forms, logic, shifts, `BSWAP`, `LEA`, multiplies, sub-registers | Differential harness passes for handlers that produce no flags | 4-5 days |
 | 3 | Flags: tracker, `SETcc`, `JCC`, `CMOVcc`, `ADC`/`SBB`/`RCR`, shift carry-out | Harness passes for all ALU, MUL, ECU and RCU handlers | 4-6 days |
 | 4 | SSE-backed handlers and the rest of MEM | Harness passes for every handler; test disc compiler tests pass; Tempest 3000 boots; first fps number | 3-4 days |
@@ -134,6 +150,46 @@ That totals roughly three to four working weeks for a developer. Milestone 4
 is the decision point: if Tempest 3000 is still far from playable there, the
 remaining gap has to come from Milestone 6 or from changes outside the
 emitter (for example block linking or running MPEs on separate threads).
+
+## Progress
+
+### Milestone 1 (done, 2026-11-14)
+
+- Build option, asmjit AArch64 sources, `MAP_JIT` code buffer with per-thread
+  write/execute switching around block compilation.
+- Block prologue/epilogue, helper calls, labels and forward jumps, 32-bit
+  moves between registers, memory and immediates; everything else is a stub.
+- A self-test at core start (when the switch is on) runs an empty block, a
+  helper call, a forward jump and an unsupported-primitive block. It passes on
+  the M4 Pro inside RetroArch.
+- With the switch on, real blocks made only of the implemented primitives
+  already run natively: 3,400 on the test disc, which still passes, and a few
+  hundred in Tempest 3000, which still boots. Speed is unchanged, as expected.
+- `NUANCE_PERF=1` also logs how many blocks compiled and which primitives
+  stopped the rest. For Tempest 3000 the top of that list is `ANDIR`, `BSWAP`,
+  `SUBIR`, `ANDIM`, `ADDMR`, `SUBMR`, `TESTIR`, `ADDIR`, `LEA`, which is the
+  order to implement them in.
+
+Things milestone 1 turned up:
+
+- **The code buffer was never allocated on Apple Silicon.** The `VirtualAlloc`
+  shim asked for `MAP_32BIT`, which macOS defines but cannot satisfy on arm64,
+  so the buffer was null and every hot packet retried a compile that could not
+  succeed. Fixed; the buffer also falls back to plain read/write memory where
+  executable memory is refused.
+- **IL-only block compilation breaks Tempest 3000.** Once the buffer existed,
+  `[DynamicCompiler] Enabled` made every block an IL block, and MPE3 ran into
+  illegal memory addresses during boot, even with blocks capped at one packet
+  and constant propagation off. Not investigated further. Arm builds now
+  interpret every packet unless the native emitter is switched on, which is
+  what the source already said they did. This also changes Linux and Android
+  Arm64 builds, where IL blocks had been in use; that is untested there.
+- The x86-64 JIT build still compiles and links (cross-compiled here, not run).
+
+### Next: milestone 2
+
+Integer primitives without flags, in the order the block statistics give, plus
+8- and 16-bit sub-registers and the differential harness.
 
 ## Scope
 

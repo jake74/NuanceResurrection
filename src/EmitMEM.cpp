@@ -30,6 +30,11 @@ static inline void Emit_LoadBankPtr(EmitterVariables * const vars)
     return;
   }
 #endif
+#ifdef USE_A64_JIT
+  // Needs a 64-bit table load of its own; the 32-bit form below would truncate the pointer.
+  cc.A64_Unsupported("LoadBankPtr");
+  return;
+#endif
   // 32-bit: entries are 4 bytes, ebx has index*4, scale=1 -> byte offset = index*4
   // The absolute address is emitted as a 32-bit displacement, so the pointer is
   // truncated on purpose. Say so through uintptr_t: a direct pointer-to-int32 cast errors on clang otherwise
