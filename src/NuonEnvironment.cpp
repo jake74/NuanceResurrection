@@ -341,7 +341,23 @@ uint32 NuonEnvironment::DrainAudioRing(int16_t* dst, uint32 maxFrames)
   return toCopy / 4;
 }
 
+#ifdef USE_A64_JIT
+// The Arm64 JIT's differential test watches which guest addresses the
+// interpreter touches (a64_difftest.cpp). Null outside that test.
+void (*a64MemoryTraceHook)(uint32 address, void *pointer) = nullptr;
+
 void *NuonEnvironment::GetPointerToMemory(const uint32 mpe_idx, const uint32 address, const bool bCheckAddress)
+{
+  void * const pointer = GetPointerToMemoryUntraced(mpe_idx, address, bCheckAddress);
+  if(a64MemoryTraceHook)
+    a64MemoryTraceHook(address, pointer);
+  return pointer;
+}
+
+void *NuonEnvironment::GetPointerToMemoryUntraced(const uint32 mpe_idx, const uint32 address, const bool bCheckAddress)
+#else
+void *NuonEnvironment::GetPointerToMemory(const uint32 mpe_idx, const uint32 address, const bool bCheckAddress)
+#endif
 {
   if(address < MPE_ADDR_SPACE_BASE)
   {

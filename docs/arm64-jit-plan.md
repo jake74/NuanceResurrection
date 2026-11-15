@@ -1,11 +1,11 @@
 # Arm64 JIT backend: plan
 
-Status (2026-11-15): milestones 1 to 3 are done and most of 4. Every block
-Tempest 3000 and the test disc ask for now compiles to native code, and
-Tempest 3000 runs about three times faster than on the interpreter. The
-emitter is still off by default: instructions that touch memory or change
-control flow run natively but are not yet covered by the differential test.
-See [Progress](#progress).
+Status (2026-11-15): milestones 1 to 4 are done. Every block Tempest 3000 and
+the test disc ask for compiles to native code, Tempest 3000 runs about three
+times faster than on the interpreter, and the differential test finds no
+difference from the interpreter across arithmetic, memory and branch
+instructions. The emitter is still off by default until someone has played
+through real games with it (milestone 5). See [Progress](#progress).
 
 ## Goal
 
@@ -218,14 +218,13 @@ instruction, so there was nothing to gain from two passes.
 
   ```
   cd build-libretro
-  NUANCE_ARM64_JIT=1 NUANCE_A64_DIFFTEST=100000,1 ./a64_difftest_host ./nuance_libretro.dylib ../NUON.CD
+  NUANCE_ARM64_JIT=1 NUANCE_A64_DIFFTEST=200000,1 ./a64_difftest_host ./nuance_libretro.dylib ../NUON.CD
   ```
 
-  It covers ALU, MUL and RCU instructions. 100% of trials compile natively and
-  700,000 trials over seven seeds show no mismatch. The only differences left
-  are multiplies whose shift field asks for a left shift by 64, which the
-  hardware documentation does not define and C++ leaves undefined in the
-  interpreter; the test counts those separately.
+  (trials, then seed; about a minute and a half per 200,000 trials on an M4 Pro)
+
+  At this stage it covered ALU, MUL and RCU instructions: 700,000 trials over
+  seven seeds without a mismatch. Milestone 4 extended it.
 
 Emitter bugs the test found, present on x86 too and fixed here:
 
@@ -237,7 +236,7 @@ Emitter bugs the test found, present on x86 too and fixed here:
 - `DecompressPacket` used uninitialised stack as a handler index for encodings
   the decoders do not recognise. It now zeroes its scratch entry.
 
-### Milestone 4 (in progress)
+### Milestone 4 (done, 2026-11-15)
 
 - Vector primitives are implemented: the 128-bit and scalar moves, `PAND`,
   `PADDD`, `PSUBD`, `PMULLD`, `PHADDD`, `PSRAD`, `PSLLD`, `PSHUFB`, `SHUFPS`,
@@ -258,16 +257,38 @@ Emitter bugs the test found, present on x86 too and fixed here:
   holds to one packet per block in system-bus code, does not speed up at all
   (about 9 million packets per second either way) and is now what limits the
   game.
-- Still to do: extend the differential test to instructions that touch memory
-  and to branches, which is what stands between this and switching the
-  emitter on by default; then gameplay testing, which needs someone at the
-  controller.
+- The differential test now builds whole packets of up to four instructions
+  across the encoding space, including memory instructions (loads, stores,
+  pixel and bilinear addressing, push and pop) and branches with their delay
+  slots, and runs both sides through the real dispatcher. It compares the 48
+  registers, the stack pointer, where execution ended up, and the memory the
+  run touched. Of the 216 instruction handlers that have an emitter it
+  exercises 206. The ten it does not: three that access control registers
+  (left out because they reconfigure the machine under the test), two that
+  only constant propagation produces, four that no decoder ever generates,
+  and the ECU no-op.
+- Result, ten seeds of 200,000 trials each: 1,801,064 runs compared, 664,042
+  of them with memory access and 842,799 with a branch (447,967 taken), and
+  no mismatch. The rest of the 2,000,000 trials were not compared: about 9%
+  reached memory outside what the test controls or halted the processor, and
+  about 0.5% contained a branch the block fetcher will not compile.
+- What the test leaves out on purpose, because the instruction set does not
+  define the result and the interpreter and the emitters each do something of
+  their own (on x86 as well): a multiply whose shift field asks for a left
+  shift by 64; `butt` with r31 as destination; byte, word, scalar and vector
+  access through (xy)/(uv) addressing at an unaligned address or under a
+  sub-byte pixel type; two instructions in one packet writing the same
+  register or flag, or belonging to the same execution unit; and vector
+  operands that are not a multiple of four, for which the decoder's
+  dependency information does not match what the handlers touch.
 
 Testing aids added along the way, all environment variables:
 `NUANCE_A64_WATCHDOG=1` reports where the emulation is if frames stop for five
 seconds, `NUANCE_AUTOPRESS=<frames>` presses START periodically so an
 unattended run gets past prompts, `NUANCE_A64_DIFFTEST_TRACE=1` names each
-block before the differential test runs it.
+block before the differential test runs it, and
+`NUANCE_A64_DIFFTEST_DUMP=<trial>` prints that trial's generated code as hex
+for a disassembler.
 
 One thing to know when testing from a shell on macOS: RetroArch started as a
 background process stops being given frames after a few seconds. Start it

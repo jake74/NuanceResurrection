@@ -105,6 +105,9 @@ public:
 
   void WriteFile(MPE &mpe, uint32 fd, uint32 buf, uint32 len);
   void *GetPointerToMemory(const uint32 mpe_idx, const uint32 address, const bool bCheckAddress = true);
+#ifdef USE_A64_JIT
+  void *GetPointerToMemoryUntraced(const uint32 mpe_idx, const uint32 address, const bool bCheckAddress);
+#endif
   void *GetPointerToSystemMemory(const uint32 address, const bool bCheckAddress = true);
   void InitBios();
   void InitAudio();
