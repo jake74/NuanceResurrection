@@ -10,6 +10,11 @@ ControllerData *controller;
 // or a spinner to offer adds CTRLR_ANALOG1 or CTRLR_QUADSPINNER1 before the
 // game starts (libretro.cpp).
 uint32 nuonControllerProperties = KEYBOARD_JOYSTICK_PROPERTIES;
+// The controller is announced at start-up as newly plugged in, and a game that
+// looks (Tempest 3000) then stops at "your controller configuration has
+// changed, press start". With this false it is presented as having been
+// there all along.
+bool nuonControllerAnnounceAtBoot = true;
 
 #define NUM_CONTROLLER_ENTRIES (9)
 
@@ -32,7 +37,7 @@ void ControllerInitialize(MPE &mpe)
   }
 
   const uint32 properties = nuonControllerProperties;
-  controller[1].config = SwapBytes((uint32)CONTROLLER_CHANGED_BIT | properties);
+  controller[1].config = SwapBytes((uint32)(nuonControllerAnnounceAtBoot ? CONTROLLER_CHANGED_BIT : CONTROLLER_STATUS_BIT) | properties);
 }
 
 void DeviceDetect(MPE &mpe)

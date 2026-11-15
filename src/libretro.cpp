@@ -409,6 +409,11 @@ static void ApplyCoreOptions()
             }
         }
     }
+    var = { "nuance_skip_controller_message", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        extern bool nuonControllerAnnounceAtBoot; // read when the BIOS sets the controller up
+        nuonControllerAnnounceAtBoot = strcmp(var.value, "enabled") != 0;
+    }
     var = { "nuance_spinner_sensitivity", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
         spinnerSensitivity = atoi(var.value) / 100.0f;
@@ -442,6 +447,7 @@ void retro_set_environment(retro_environment_t cb)
         { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
         { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
         { "nuance_controller", "Controller; d-pad only|spinner|analog stick" },
+        { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
         { "nuance_spinner_sensitivity", "Spinner sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
         { "nuance_spinner_inertia", "Spinner weight (inertia); 50%|0%|10%|20%|30%|40%|60%|70%|80%|90%|100%" },
         { "nuance_spinner_invert", "Spinner direction; normal|reversed" },

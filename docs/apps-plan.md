@@ -106,6 +106,13 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
   300 counts moved the claw two lanes in one test, and the knob is limited
   to 40 counts a frame because the game takes differences of an 8-bit
   count. The apps should show sensitivity and weight as sliders.
+- **Controller message:** done. Tempest 3000 opens with "your controller
+  configuration has changed, please press start" every time, because the
+  emulated controller is announced at start-up as newly plugged in. Core
+  option `nuance_skip_controller_message` presents it as already connected
+  and the game goes straight to its title. Off by default in the core; the
+  apps turn it on. (The steady 18.75 frames a second measured earlier on
+  "the title screen" with no input was this message screen.)
 - **High scores for Tempest 3000:** not started. The game never saved them
   (Jake: a hardware restriction), so the plan is to find the table in the
   game's memory, keep a copy in a file, put it back after boot, and offer a
