@@ -150,8 +150,13 @@ std::string MakeTempDir()
   }
   return std::string();
 #else
-  char tmpl[] = "/tmp/nuance_XXXXXX";
-  char* dir = mkdtemp(tmpl);
+  // TMPDIR if it is set, /tmp otherwise. Android has no /tmp: a frontend
+  // there points TMPDIR at its cache directory before loading a game.
+  const char * const base = getenv("TMPDIR");
+  std::string tmpl = std::string((base && *base) ? base : "/tmp");
+  if(tmpl.back() == '/') tmpl.pop_back();
+  tmpl += "/nuance_XXXXXX";
+  char* dir = mkdtemp(&tmpl[0]);
   return dir ? std::string(dir) : std::string();
 #endif
 }

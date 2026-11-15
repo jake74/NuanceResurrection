@@ -33,12 +33,14 @@ public:
 #else
     bAllowCompile = true;
 #endif
-    // On by default where it has been played on: Apple silicon Macs. Other
-    // Arm64 hosts have the backend compiled in but untested, so it stays off
-    // there unless nuance.cfg or NUANCE_ARM64_JIT asks for it. Either way the
-    // core runs the backend's self-test first and falls back to the
-    // interpreter if generated code cannot be run.
-#if defined(USE_A64_JIT) && defined(__APPLE__)
+    // On by default where it has been run and checked: Apple silicon Macs,
+    // and Android (differential test clean and Tempest 3000 measured on a
+    // Xiaomi Pad Mini, Android 16). Other Arm64 hosts have the backend
+    // compiled in but untested, so it stays off there unless nuance.cfg or
+    // NUANCE_ARM64_JIT asks for it. Either way the core runs the backend's
+    // self-test first and falls back to the interpreter if generated code
+    // cannot be run.
+#if defined(USE_A64_JIT) && (defined(__APPLE__) || defined(__ANDROID__))
     bArm64NativeCode = true;
 #else
     bArm64NativeCode = false;

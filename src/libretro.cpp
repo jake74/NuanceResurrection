@@ -1500,7 +1500,13 @@ void retro_run(void)
             for (unsigned& target : shotFrames) {
                 if (target && perfVidSyncTotal >= target) {
                     std::vector<unsigned char> px((size_t)FB_WIDTH * FB_HEIGHT * 4);
+#ifdef GL_BGRA
                     glReadPixels(0, 0, FB_WIDTH, FB_HEIGHT, GL_BGRA, GL_UNSIGNED_BYTE, px.data());
+#else
+                    // OpenGL ES reads RGBA only; a .bmp wants blue first.
+                    glReadPixels(0, 0, FB_WIDTH, FB_HEIGHT, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+                    for (size_t i = 0; i + 3 < px.size(); i += 4) { const unsigned char r = px[i]; px[i] = px[i + 2]; px[i + 2] = r; }
+#endif
                     const std::string name = shotPrefix + "-" + std::to_string(target) + ".bmp";
                     if (FILE* const f = fopen(name.c_str(), "wb")) {
                         const unsigned dataSize = FB_WIDTH * FB_HEIGHT * 4, fileSize = 54 + dataSize;

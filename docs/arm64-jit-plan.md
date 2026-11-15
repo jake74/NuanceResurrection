@@ -594,6 +594,38 @@ For testing: RetroArch cannot load a core from an external volume without
 macOS asking for permission, so scripted runs use a copy of the built core
 in a temporary directory.
 
+### Android: first run on a device (2026-11-15)
+
+Device: Xiaomi Pad Mini (MediaTek MT8799: one core at 3.73 GHz, three at
+3.3, four at 2.4), Android 16. Built with NDK r27c for arm64-v8a, API 29,
+and run from `adb shell` in `/data/local/tmp`, with no app.
+
+- **The compiler works there unchanged.** The self-test passes and the
+  differential test gives 180,563 trials compared, none mismatched, for
+  seed 1: the same count as on the Mac. Writable-and-executable memory is
+  granted to a shell process; an app is still to be tried.
+- **Speed**, measured with `tools/perf_host.c`, a host that never gives the
+  core a graphics context, so it emulates and logs but draws nothing:
+
+  | Tempest 3000, level one | Pad | M4 Pro, same host |
+  |---|---|---|
+  | 30 frames-a-second limit | 29.2-29.8 | 29.5-30.0 |
+  | No limit | 41-53 | 48-56 |
+  | MPE0 with no limit (54 million is the cap) | 47-52 million | 54 million |
+
+  Ten minutes of a scripted game (firing, sweeping the stick) at the 30
+  limit averaged 27 frames a second every minute from the second to the
+  tenth, lowest five-second interval 25. No slowing over the ten minutes.
+- Interpreted, the same run gives 2 frames a second.
+
+Not covered: drawing and sound (the host is headless), and running as an
+app, which may be scheduled differently from a shell process.
+
+Changes this needed: the temporary folder for unpacked discs comes from
+`TMPDIR` when it is set (Android has no `/tmp`); the screenshot aid reads
+RGBA on OpenGL ES; `[Arm64NativeCode] Auto` now means on for Android as
+well as for Apple silicon Macs.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along
