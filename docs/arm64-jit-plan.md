@@ -493,6 +493,26 @@ not busy all the time), `VidSync` about 35 a second.
 The per-MPE figures in the perf log occasionally show twice the real value
 (108 for 54): the counters are read from another thread without a lock.
 
+### Is 60 frames a second possible? (2026-11-15)
+
+Measured on the title screen, where the work per frame is constant, with
+`NUANCE_MPE_HZ` at 27, 54 and about 80 million (no limit): 9.4, 18.75 and
+29.4 frames a second. The frame rate is proportional to MPE speed, about
+2.9 million packets per MPE per frame there. In level one the game draws
+about 35 frames a second at 54 million and about 42 with no limit.
+
+So at the speed of the real machine the game does not reach 60, and no
+published figure for the original was found. Reaching 60 means running the
+MPEs at 1.7 times hardware speed in quiet play and about 3 times in busy
+scenes; the host manages 1.1-1.5 times in quiet play today and less than
+hardware speed in busy ones. Jake's impression of the unlimited build was
+that the game itself ran faster, which says the game advances per frame
+drawn, so overclocking to 60 would also speed the game up.
+
+`NUANCE_PERF_EVENTS=1` logs each disc read with the time and the game's
+frame count. The reads turned out to be music streaming, on the clock, and
+the length of an unattended game varies too much to serve as a landmark.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

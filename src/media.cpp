@@ -1,3 +1,4 @@
+#include <chrono>
 #include "basetypes.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -476,6 +477,22 @@ void MediaGetInfo(MPE &mpe)
 
 void MediaRead(MPE &mpe)
 {
+  {
+    // NUANCE_PERF_EVENTS: one line per disc read, with the time and how many
+    // frames the game has drawn - landmarks for telling whether a game paces
+    // itself by frames or by the clock.
+    extern unsigned perfVidSyncTotal;
+    extern void libretro_log_info(const char* text);
+    static const bool bEvents = getenv("NUANCE_PERF_EVENTS") != nullptr;
+    if(bEvents)
+    {
+      static const auto start = std::chrono::steady_clock::now();
+      char line[160];
+      snprintf(line, sizeof(line), "event: MediaRead block %u count %u at %.2f s, frame %u",
+        (unsigned)mpe.regs[2], (unsigned)mpe.regs[3], std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count(), perfVidSyncTotal);
+      libretro_log_info(line);
+    }
+  }
   const int32 handle = mpe.regs[0];
   const uint32 mode = mpe.regs[1];
   const uint32 startblock = mpe.regs[2];
