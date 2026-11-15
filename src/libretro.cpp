@@ -379,6 +379,126 @@ static void ApplyAnalogControls()
     controller[1].d5.spinner1 = (int8)(uint8)((long long)spinnerPosition & 0xFF);
 }
 
+// Tempest 3000's high scores. The game keeps its table in memory and nowhere
+// else, so on the real machine it was gone when the power went off. Here the
+// table is copied to a file whenever it changes and put back when the game
+// has loaded.
+//
+// It lives in two places in system-bus RAM: the text of the high-score
+// screen, which holds the names (and the scores as they were last printed),
+// and eight 32-bit scores next to the game's other variables. The addresses
+// were found by playing the game and comparing memory before and after a new
+// score went on the table. The untouched text doubles as the test for "this
+// is Tempest 3000 and it has just loaded": if those 338 bytes are not at that
+// address, nothing is done.
+namespace t3kScores {
+constexpr uint32 kTextAddress = 0x8010C3A0U;
+constexpr uint32 kTextLength = 338;
+constexpr uint32 kScoresAddress = 0x80113420U;
+constexpr uint32 kScoresLength = 8 * 4;
+const char kPristineText[kTextLength + 1] =
+    "_^Mtempest 3000/ /^Phigh scorers/ / / /"
+    "^P1:^N yak           ^M10000     / / /^P2:^A flossie       ^M9000      / / /"
+    "^P3:^B shaggy        ^M8000      / / /^P4:^C amber         ^M7000      / / /"
+    "^P5:^D copper        ^M6000      / / /^P6:^E beefman       ^M5000      / / /"
+    "^P7:^F mooyork       ^M4000      / / /^P8:^G goaty         ^M3000      ";
+constexpr uint32 kTextPrefixLength = 38; // "_^Mtempest 3000/ /^Phigh scorers/ / / /": still there once scores have changed
+const char kFileMagic[8] = { 'T','3','K','S','C','R','0','1' };
+
+enum { MODE_KEEP, MODE_OFF, MODE_ERASE };
+static int mode = MODE_KEEP;
+static std::string fileName;
+static bool bGameSeen = false;          // the pristine text has been found, so this is the game
+static uint8 pristineScores[kScoresLength];
+static uint8 lastSaved[kTextLength + kScoresLength];
+static bool bHaveLastSaved = false;
+
+static uint8* Text()   { return &nuonEnv.systemBusDRAM[kTextAddress & SYSTEM_BUS_VALID_MEMORY_MASK]; }
+static uint8* Scores() { return &nuonEnv.systemBusDRAM[kScoresAddress & SYSTEM_BUS_VALID_MEMORY_MASK]; }
+
+static void Reset()
+{
+    bGameSeen = false;
+    bHaveLastSaved = false;
+}
+
+// Once a frame until the game is recognised, then every few seconds.
+static void Tick(const bool bSaveNow)
+{
+    if (fileName.empty() || !nuonEnv.systemBusDRAM)
+        return;
+
+    if (!bGameSeen) {
+        if (memcmp(Text(), kPristineText, kTextLength) != 0)
+            return;
+        const bool bHeld = HoldEmuThread();
+        if (memcmp(Text(), kPristineText, kTextLength) == 0) {
+            bGameSeen = true;
+            memcpy(pristineScores, Scores(), kScoresLength);
+            if (mode == MODE_KEEP) {
+                uint8 file[sizeof(kFileMagic) + kTextLength + kScoresLength];
+                FILE* const f = fopen(fileName.c_str(), "rb");
+                if (f) {
+                    if (fread(file, 1, sizeof(file), f) == sizeof(file) && memcmp(file, kFileMagic, sizeof(kFileMagic)) == 0
+                        && memcmp(file + sizeof(kFileMagic), kPristineText, kTextPrefixLength) == 0) {
+                        memcpy(Text(), file + sizeof(kFileMagic), kTextLength);
+                        memcpy(Scores(), file + sizeof(kFileMagic) + kTextLength, kScoresLength);
+                        log_printf("libretro: Tempest 3000 high scores restored from %s\n", fileName.c_str());
+                    }
+                    fclose(f);
+                }
+            }
+            memcpy(lastSaved, Text(), kTextLength);
+            memcpy(lastSaved + kTextLength, Scores(), kScoresLength);
+            bHaveLastSaved = true;
+        }
+        if (bHeld) ReleaseEmuThread();
+        return;
+    }
+
+    if (mode != MODE_KEEP || !bSaveNow)
+        return;
+    uint8 now[kTextLength + kScoresLength];
+    const bool bHeld = HoldEmuThread();
+    memcpy(now, Text(), kTextLength);
+    memcpy(now + kTextLength, Scores(), kScoresLength);
+    if (bHeld) ReleaseEmuThread();
+    // Only a table that still looks like one: the game may have been replaced
+    // by something else in the same memory.
+    if (memcmp(now, kPristineText, kTextPrefixLength) != 0 || memchr(now, 0, kTextLength))
+        return;
+    if (bHaveLastSaved && memcmp(now, lastSaved, sizeof(now)) == 0)
+        return;
+    const std::string tmp = fileName + ".tmp";
+    if (FILE* const f = fopen(tmp.c_str(), "wb")) {
+        const bool bOk = fwrite(kFileMagic, 1, sizeof(kFileMagic), f) == sizeof(kFileMagic) && fwrite(now, 1, sizeof(now), f) == sizeof(now);
+        fclose(f);
+        if (bOk && rename(tmp.c_str(), fileName.c_str()) == 0) {
+            memcpy(lastSaved, now, sizeof(now));
+            bHaveLastSaved = true;
+        }
+    }
+}
+
+// The "erase" setting: the saved table goes, and the running game gets its
+// original one back.
+static void Erase()
+{
+    if (!fileName.empty())
+        remove(fileName.c_str());
+    if (bGameSeen) {
+        const bool bHeld = HoldEmuThread();
+        if (memcmp(Text(), kPristineText, kTextPrefixLength) == 0) {
+            memcpy(Text(), kPristineText, kTextLength);
+            memcpy(Scores(), pristineScores, kScoresLength);
+        }
+        if (bHeld) ReleaseEmuThread();
+    }
+    bHaveLastSaved = false;
+    log_printf("libretro: Tempest 3000 high scores erased\n");
+}
+}
+
 // Core options (see retro_set_environment). Called once the game is loaded,
 // after nuance.cfg has been read, and again whenever the frontend says an
 // option has changed.
@@ -392,6 +512,13 @@ static void ApplyCoreOptions()
             nuonEnv.bUseCRTshader = bWanted;
             VideoReinstallShaders();
         }
+    }
+    var = { "nuance_t3k_high_scores", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        const int wanted = !strcmp(var.value, "erase") ? t3kScores::MODE_ERASE : (!strcmp(var.value, "do not keep") ? t3kScores::MODE_OFF : t3kScores::MODE_KEEP);
+        if (wanted == t3kScores::MODE_ERASE && (t3kScores::mode != t3kScores::MODE_ERASE || !t3kScores::bGameSeen))
+            t3kScores::Erase();
+        t3kScores::mode = wanted;
     }
     var = { "nuance_controller", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
@@ -446,6 +573,7 @@ void retro_set_environment(retro_environment_t cb)
     static const struct retro_variable variables[] = {
         { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
         { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
+        { "nuance_t3k_high_scores", "Tempest 3000 high scores; keep|do not keep|erase" },
         { "nuance_controller", "Controller; d-pad only|spinner|analog stick" },
         { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
         { "nuance_spinner_sensitivity", "Spinner sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
@@ -640,6 +768,10 @@ bool retro_load_game(const struct retro_game_info *game)
         const std::string legacy = std::string(getcwd(cwd, sizeof(cwd)) ? cwd : ".") + "/FlashEEPROM.bin";
         const std::string saveFile = (saveDir && *saveDir) ? std::string(saveDir) + "/" + name + ".nuonsave" : legacy;
         nuonEnv.flashEEPROM.UseSaveFile(saveFile.c_str(), legacy.c_str());
+        t3kScores::Reset();
+        t3kScores::fileName = (saveDir && *saveDir) ? std::string(saveDir) + "/" + name + ".hiscores" : std::string(cwd[0] ? cwd : ".") + "/" + name + ".hiscores";
+        if (t3kScores::mode == t3kScores::MODE_ERASE)
+            remove(t3kScores::fileName.c_str());
         log_printf("libretro: saves in %s\n", saveFile.c_str());
     }
 
@@ -714,6 +846,7 @@ void retro_unload_game(void)
 {
     StopEmuThread();
     nuonEnv.flashEEPROM.SaveIfChanged();
+    t3kScores::Tick(true);
     bRun = false;
     game_loaded = false;
     VideoCleanup();
@@ -967,6 +1100,7 @@ void retro_run(void)
         static unsigned saveCheck = 0;
         if ((++saveCheck % 300) == 0)
             nuonEnv.flashEEPROM.SaveIfChanged();
+        t3kScores::Tick((saveCheck % 300) == 0);
     }
 
     // Input

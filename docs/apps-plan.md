@@ -113,10 +113,18 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
   and the game goes straight to its title. Off by default in the core; the
   apps turn it on. (The steady 18.75 frames a second measured earlier on
   "the title screen" with no input was this message screen.)
-- **High scores for Tempest 3000:** not started. The game never saved them
-  (Jake: a hardware restriction), so the plan is to find the table in the
-  game's memory, keep a copy in a file, put it back after boot, and offer a
-  way to delete it. On by default.
+- **High scores for Tempest 3000:** done. The game keeps its table only in
+  memory (on the real machine it was lost at power-off). It is in two
+  places in system-bus RAM: the text of the high-score screen at
+  `0x8010C3A0` (338 bytes; holds the names), and eight 32-bit scores at
+  `0x80113420`. Found by comparing memory snapshots (`NUANCE_DUMP_RAM`)
+  from a game Jake played before and after a new score went on. The core
+  copies both to `<game>.hiscores` in the save directory when they change
+  and puts them back once the untouched text is seen at that address, which
+  is also how it knows the game is Tempest 3000. Core option
+  `nuance_t3k_high_scores`: `keep` (default), `do not keep`, `erase`.
+  Restore, save and erase each checked with a scripted run; not yet
+  confirmed by entering a new score in play and restarting.
 
 Found on the way: the core extracts `nuon.run` to a new directory under
 `/tmp` on every load and only removes it in `retro_deinit`, so a frontend
