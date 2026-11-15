@@ -475,6 +475,81 @@ void MediaGetInfo(MPE &mpe)
   mpe.regs[0] = result;
 }
 
+// The host-side read behind MediaRead: from the file itself where there is
+// one, otherwise from inside the disc image. Returns the blocks read.
+static uint32 ReadDiscBlocks(const std::string &fileName, const uint32 startblock, const uint32 blockcount, uint8_t * const dst, bool &ioAttempted)
+{
+  uint32 readCount = 0;
+  ioAttempted = false;
+
+  FILE* inFile = nullptr;
+  if(fopen_s(&inFile, fileName.c_str(), "rb") != 0)
+    inFile = nullptr;
+
+  if(inFile)
+  {
+    fseek(inFile, startblock * BLOCK_SIZE_DVD, SEEK_SET);
+    readCount = (uint32)fread(dst, BLOCK_SIZE_DVD, blockcount, inFile);
+    fclose(inFile);
+    ioAttempted = true;
+  }
+  else
+  {
+    // Fall back to reading directly from the ISO image
+    extern std::string g_ISOPath;
+    extern std::string g_ISOPrefix;
+    if(!g_ISOPath.empty())
+    {
+      std::string fname = fileName;
+      const size_t lastSlash = fname.find_last_of("/\\");
+      if(lastSlash != std::string::npos) fname = fname.substr(lastSlash + 1);
+
+      ISO9660Reader isoReader;
+      if(isoReader.open(g_ISOPath.c_str()))
+      {
+        const std::string isoPath = g_ISOPrefix + '/' + fname;
+        uint32_t lba, fsize;
+        if(isoReader.findFile(isoPath.c_str(), lba, fsize))
+        {
+          FILE* isoFp = ISO_FOPEN(g_ISOPath.c_str(), "rb");
+          if(isoFp)
+          {
+            // int64_t rather than off64_t: the latter is a glibc type that
+            // macOS does not have (its off_t is already 64-bit), and ISO_FSEEK
+            // casts to whatever the platform's seek function takes anyway.
+            const int64_t byteOffset = (int64_t)lba * 2048 + (int64_t)startblock * BLOCK_SIZE_DVD;
+            ISO_FSEEK(isoFp, byteOffset, SEEK_SET);
+            readCount = (uint32)fread(dst, BLOCK_SIZE_DVD, blockcount, isoFp);
+            fclose(isoFp);
+            ioAttempted = true;
+          }
+        }
+        isoReader.close();
+      }
+    }
+  }
+
+  return readCount;
+}
+
+// Read-ahead. A game streaming music asks for the next stretch of the same
+// file every few seconds, and the read used to happen on the emulation thread
+// at that moment: tens of milliseconds from a local disk, up to half a second
+// from a network share, during which the game stood still. After each read the
+// stretch that follows is fetched on another thread, and the next MediaRead
+// takes it from there if that is what it asks for.
+#include <future>
+namespace {
+struct ReadAhead
+{
+  std::string fileName;
+  uint32 start = 0, count = 0, readCount = 0;
+  bool ioAttempted = false;
+  std::vector<uint8_t> data;
+  std::future<void> task;
+} g_readAhead;
+}
+
 void MediaRead(MPE &mpe)
 {
   {
@@ -546,55 +621,54 @@ void MediaRead(MPE &mpe)
   //   callback is fired immediately via the tail-call shim
   // A too-short / failed read is reported via the callback as MCB_ERROR, the way the real driver ISR would with the actual BIOS
 
+  // NUANCE_PERF: say how long the host took over this read. The emulation
+  // stands still meanwhile.
+  struct ReadTimer
+  {
+    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+    uint32 block, count;
+    ~ReadTimer()
+    {
+      static const bool bReport = getenv("NUANCE_PERF") != nullptr;
+      const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+      if(bReport && ms > 5.0)
+      {
+        extern void libretro_log_info(const char* text);
+        char line[128];
+        snprintf(line, sizeof(line), "perf: disc read of %u blocks at %u took %.0f ms", count, block, ms);
+        libretro_log_info(line);
+      }
+    }
+  } readTimer;
+  readTimer.block = startblock;
+  readTimer.count = blockcount;
+
   std::vector<uint8_t> intermediate;
   intermediate.resize((size_t)blockcount * BLOCK_SIZE_DVD);
   uint32 readCount = 0;
   bool   ioAttempted = false;
 
-  FILE* inFile = nullptr;
-  if(fopen_s(&inFile, fileNameArray[handle].c_str(), "rb") != 0)
-    inFile = nullptr;
-
-  if(inFile)
   {
-    fseek(inFile, startblock * BLOCK_SIZE_DVD, SEEK_SET);
-    readCount = (uint32)fread(intermediate.data(), BLOCK_SIZE_DVD, blockcount, inFile);
-    fclose(inFile);
-    ioAttempted = true;
-  }
-  else
-  {
-    // Fall back to reading directly from the ISO image
-    extern std::string g_ISOPath;
-    extern std::string g_ISOPrefix;
-    if(!g_ISOPath.empty())
+    ReadAhead &ra = g_readAhead;
+    if(ra.task.valid())
+      ra.task.wait(); // normally long finished
+    if(ra.task.valid() && ra.fileName == fileNameArray[handle] && startblock >= ra.start && (startblock + blockcount) <= (ra.start + ra.count)
+      && ra.ioAttempted && ra.readCount == ra.count)
     {
-      std::string fname = fileNameArray[handle];
-      const size_t lastSlash = fname.find_last_of("/\\");
-      if(lastSlash != std::string::npos) fname = fname.substr(lastSlash + 1);
+      memcpy(intermediate.data(), ra.data.data() + (size_t)(startblock - ra.start) * BLOCK_SIZE_DVD, (size_t)blockcount * BLOCK_SIZE_DVD);
+      readCount = blockcount;
+      ioAttempted = true;
+    }
+    else
+      readCount = ReadDiscBlocks(fileNameArray[handle], startblock, blockcount, intermediate.data(), ioAttempted);
 
-      ISO9660Reader isoReader;
-      if(isoReader.open(g_ISOPath.c_str()))
-      {
-        const std::string isoPath = g_ISOPrefix + '/' + fname;
-        uint32_t lba, fsize;
-        if(isoReader.findFile(isoPath.c_str(), lba, fsize))
-        {
-          FILE* isoFp = ISO_FOPEN(g_ISOPath.c_str(), "rb");
-          if(isoFp)
-          {
-            // int64_t rather than off64_t: the latter is a glibc type that
-            // macOS does not have (its off_t is already 64-bit), and ISO_FSEEK
-            // casts to whatever the platform's seek function takes anyway.
-            const int64_t byteOffset = (int64_t)lba * 2048 + (int64_t)startblock * BLOCK_SIZE_DVD;
-            ISO_FSEEK(isoFp, byteOffset, SEEK_SET);
-            readCount = (uint32)fread(intermediate.data(), BLOCK_SIZE_DVD, blockcount, isoFp);
-            fclose(isoFp);
-            ioAttempted = true;
-          }
-        }
-        isoReader.close();
-      }
+    if(ioAttempted && readCount == blockcount)
+    {
+      ra.fileName = fileNameArray[handle];
+      ra.start = startblock + blockcount;
+      ra.count = blockcount;
+      ra.data.resize((size_t)ra.count * BLOCK_SIZE_DVD);
+      ra.task = std::async(std::launch::async, [&ra]() { ra.readCount = ReadDiscBlocks(ra.fileName, ra.start, ra.count, ra.data.data(), ra.ioAttempted); });
     }
   }
 

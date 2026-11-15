@@ -523,6 +523,26 @@ is a cap, not a lock: a frame that takes longer than two fields is not held
 further, so level one averages about 26 frames a second with a cap of 30.
 Disabled in the repository's `nuance.cfg`.
 
+### Split-second hangs in play (2026-11-15)
+
+Jake reported the game freezing for a moment every half minute or so. His
+log shows it: four five-second intervals in which 0.25 to 0.65 seconds of
+audio went undelivered and every MPE ran short, so the whole emulation
+thread had stopped.
+
+The likely cause is the disc. The game streams its music by reading 2 MB
+every 16 seconds, `MediaRead` did that read on the emulation thread, and
+the image sits on a network share. Timed here, with the data already in the
+host's cache, a read took 39 to 96 ms. `MediaRead` now fetches the stretch
+that follows each read on another thread, and serves the next request from
+it when it matches; in a scripted run no read takes more than 5 ms. A read
+the game makes out of sequence (a change of track) is still synchronous.
+
+Not proven to be the whole story: the half-second stalls did not occur in
+scripted runs before the change either. With `NUANCE_PERF` the log now
+names any disc read over 5 ms and any gap over 20 ms in the emulation
+("emulation stalled"), whatever causes it.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

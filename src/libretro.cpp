@@ -597,6 +597,16 @@ static void RunEmulation(const bool bThreaded)
             if (bIdleRound && bThreaded)
                 usleep(50);
             const uint64 new_time = useconds_since_start();
+            {
+                // NUANCE_PERF: report any gap of more than 20 ms between two looks
+                // at the clock - the emulation stood still for that long.
+                static uint64 lastCheck = 0;
+                static const bool bStalls = getenv("NUANCE_PERF") != nullptr;
+                if (bStalls && lastCheck && new_time - lastCheck > 20000)
+                    log_printf("libretro: perf: emulation stalled for %.0f ms (MPE pcs %08X %08X %08X %08X)\n", (new_time - lastCheck) / 1000.0,
+                        nuonEnv.mpe[0].pcexec, nuonEnv.mpe[1].pcexec, nuonEnv.mpe[2].pcexec, nuonEnv.mpe[3].pcexec);
+                lastCheck = new_time;
+            }
             if (mpeHz) {
                 // At most 4 ms of credit, so a stall is not followed by a burst.
                 const int64_t earned = (int64_t)((new_time - mpeCreditTime) * (uint64)mpeHz / 1000000);
