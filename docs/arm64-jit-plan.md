@@ -543,6 +543,28 @@ scripted runs before the change either. With `NUANCE_PERF` the log now
 names any disc read over 5 ms and any gap over 20 ms in the emulation
 ("emulation stalled"), whatever causes it.
 
+### Correction: the scripted runs were pausing the game (2026-11-15)
+
+Jake noticed that the scripted runs pressed START every 150 frames all the
+way through, and START is the pause button once a game is running. Every
+level-one figure above this point was therefore measured on a game paused
+about half the time. Comparisons between builds were made under the same
+conditions and the direction of each still stands; the absolute figures do
+not. `NUANCE_AUTOPRESS_START_UNTIL=<frame>` now drops START from the presses
+after that many frames (500 gets Tempest 3000 into level one).
+
+Level one re-measured without pausing, mean of nine five-second intervals:
+
+| Setting | Frames a second | MPE0 / MPE1 / MPE2 (million packets a second) |
+|---|---|---|
+| Hardware speed (54 million), no frame cap | 41 | 57 / 45 / 48 |
+| No speed limit, no frame cap | 50 | 62 / 72 / 66 |
+| Hardware speed, capped at 30 | 29.7, steady | 60 / 36 / 37 |
+
+With the cap the game holds 30 throughout level one, with the rendering
+MPEs at about two thirds of their allowance. Jake has also confirmed that
+pause works with the emulation thread.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

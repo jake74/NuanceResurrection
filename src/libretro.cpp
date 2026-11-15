@@ -220,9 +220,14 @@ static uint16 GetInputButtons()
         }
     }
     if (autoPress > 10) {
+        // NUANCE_AUTOPRESS_START_UNTIL=<frame>: leave START out after that many
+        // polls. START gets a run into a game, but in the game it is the pause
+        // button, and a run that keeps pressing it measures a game that is
+        // paused half the time.
+        static const int startUntil = getenv("NUANCE_AUTOPRESS_START_UNTIL") ? atoi(getenv("NUANCE_AUTOPRESS_START_UNTIL")) : 0;
         static int autoPressFrame = 0;
         if ((++autoPressFrame % autoPress) < 10)
-            buttons |= autoButtons;
+            buttons |= (startUntil && autoPressFrame > startUntil) ? (autoButtons & ~CTRLR_BUTTON_START) : autoButtons;
     }
     return buttons;
 }
