@@ -158,6 +158,28 @@ audio arriving at the right rate and the core's picture correct in the
 host's frame buffer. Not yet checked by a person: the picture as drawn in
 the window, the sound by ear, and a real controller.
 
+Phase 2, the Mac app, has a first version as of 2026-11-15
+(`nagori3k/mac/App`, built by `build.sh` into `build/nagori3k.app`):
+library from a folder with cover art (a picture beside the game, else
+Wikipedia's cover for an exactly matching article title), play in the
+window, settings (stick on/off, sensitivity, weight, direction, scanlines,
+stretch to fill, 30 frames-a-second limit, skip the controller message,
+keep or delete high scores), button remapping for controller and
+keyboard, and full screen with no toolbar, Command-F, Escape to leave and
+the pointer hidden. Minimum macOS 14, Arm64 only, ad-hoc signed.
+
+Checked by test runs: it builds, the library and button screens render,
+a game runs with sound produced, stopping and starting a game in one
+process works, and in full screen the toolbar is gone. Confirmed by Jake:
+the picture and the controller in the bare player. Still for Jake to try:
+the Game settings tab, remapping, switching games, the full-screen keys.
+
+Not done: an Xcode project, Developer ID signing with the allow-jit
+entitlement, notarisation, an app icon. Only `.iso` and `.chd` load;
+Jake's other titles are `.mdf` or `.zip`, which the core does not read.
+Tempest 3000 has no widescreen mode (it never calls `VidQueryConfig`),
+hence the stretch option.
+
 ### Features
 
 - **Library.** The user picks a folder; the app keeps access to it across
