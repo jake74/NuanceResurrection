@@ -125,9 +125,11 @@ Made on 2026-11-15:
 
 1. **Where the apps live:** a separate repository, with this one as a
    submodule.
-2. **Name:** "Nu-one" is the working name. It sounds the same as NUON, which
-   is what a trademark comparison goes by, so it is fine for personal builds
-   but should be looked at again before anything is published.
+2. **Name:** **nagori3k** (decided later the same day, replacing the working
+   name "Nu-one"). *Nagori* (名残) is the trace that lingers after something
+   has passed. Its stated focus is bringing Tempest 3000 back for fans of
+   Jeff Minter. The repository is `jake74/nagori3k` (private for now), with
+   this fork as the submodule `core/`.
 3. **iOS scope:** to be decided after the phase 0 measurement.
 4. **Minimum OS versions:** macOS 14, iOS 17, Android 10 (API 29), Arm64 only.
 
