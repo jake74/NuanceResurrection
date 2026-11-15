@@ -6,6 +6,10 @@
 
 extern NuonEnvironment nuonEnv;
 ControllerData *controller;
+// What the controller in port 1 says it has. A frontend with an analog stick
+// or a spinner to offer adds CTRLR_ANALOG1 or CTRLR_QUADSPINNER1 before the
+// game starts (libretro.cpp).
+uint32 nuonControllerProperties = KEYBOARD_JOYSTICK_PROPERTIES;
 
 #define NUM_CONTROLLER_ENTRIES (9)
 
@@ -27,7 +31,7 @@ void ControllerInitialize(MPE &mpe)
     controller[i].d6.quadjoyY = 0;
   }
 
-  const uint32 properties = KEYBOARD_JOYSTICK_PROPERTIES;
+  const uint32 properties = nuonControllerProperties;
   controller[1].config = SwapBytes((uint32)CONTROLLER_CHANGED_BIT | properties);
 }
 
@@ -47,7 +51,7 @@ void DeviceDetect(MPE &mpe)
 
     if(controller)
     {
-      config = SwapBytes((uint32)CONTROLLER_STATUS_BIT | (uint32)KEYBOARD_JOYSTICK_PROPERTIES);
+      config = SwapBytes((uint32)CONTROLLER_STATUS_BIT | nuonControllerProperties);
 
       controller[1].config = config;
     }

@@ -96,7 +96,20 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
   supports that at all, is not known yet.
 - **No config file:** done. The core runs from a system directory holding
   only the three BIOS files; the Arm64 compiler is on by default on Macs.
-- **Analog input:** not started.
+- **Analog input:** done, pending Jake's feel test. Core option
+  `nuance_controller`: `d-pad only`, `spinner` or `analog stick`. Tempest
+  3000 reads both a quadrature spinner and an analog stick (checked by
+  feeding each and watching the claw move). The spinner is driven from the
+  left stick through a flywheel model, or directly from a mouse or
+  trackpad; `nuance_spinner_sensitivity` (10%-400%), `nuance_spinner_inertia`
+  (0%-100%) and `nuance_spinner_invert` tune it. The scale is a guess: about
+  300 counts moved the claw two lanes in one test, and the knob is limited
+  to 40 counts a frame because the game takes differences of an 8-bit
+  count. The apps should show sensitivity and weight as sliders.
+- **High scores for Tempest 3000:** not started. The game never saved them
+  (Jake: a hardware restriction), so the plan is to find the table in the
+  game's memory, keep a copy in a file, put it back after boot, and offer a
+  way to delete it. On by default.
 
 Found on the way: the core extracts `nuon.run` to a new directory under
 `/tmp` on every load and only removes it in `retro_deinit`, so a frontend

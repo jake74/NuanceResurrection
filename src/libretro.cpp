@@ -294,6 +294,91 @@ static void context_destroy(void)
     VideoInvalidateGLState();
 }
 
+// Analog controls. A NUON controller can carry an analog stick or a
+// quadrature spinner besides its buttons, and Tempest 3000 reads both. The
+// spinner is the interesting one: the arcade Tempest was played with a
+// weighted rotary knob, and "spinner" here is that knob driven from a
+// gamepad. The left stick pushes a flywheel round - the further over, the
+// faster it is driven - and the flywheel keeps turning for a moment when the
+// stick is let go, the more so the heavier it is set. A mouse or trackpad
+// turns it directly: that already is a hand on a knob.
+// (The libretro.h in this tree is a cut-down one; these are the standard values.)
+#ifndef RETRO_DEVICE_MOUSE
+#define RETRO_DEVICE_MOUSE 2
+#endif
+#ifndef RETRO_DEVICE_ANALOG
+#define RETRO_DEVICE_ANALOG 5
+#endif
+#ifndef RETRO_DEVICE_INDEX_ANALOG_LEFT
+#define RETRO_DEVICE_INDEX_ANALOG_LEFT 0
+#define RETRO_DEVICE_ID_ANALOG_X 0
+#define RETRO_DEVICE_ID_ANALOG_Y 1
+#endif
+#ifndef RETRO_DEVICE_ID_MOUSE_X
+#define RETRO_DEVICE_ID_MOUSE_X 0
+#endif
+extern uint32 nuonControllerProperties; // joystick.cpp
+enum { CONTROL_DPAD, CONTROL_SPINNER, CONTROL_ANALOG };
+static int controlMode = CONTROL_DPAD;
+static float spinnerSensitivity = 1.0f; // 1 = full stick turns the knob about one revolution of a 16-lane web a second
+static float spinnerInertia = 0.5f;     // 0 = stops with the stick, 1 = barely slows
+static float spinnerDirection = 1.0f;
+static float spinnerVelocity = 0.0f;    // counts per frame
+static double spinnerPosition = 0.0;    // counts; the game sees the low 8 bits
+
+static void ApplyAnalogControls()
+{
+    if (!controller || controlMode == CONTROL_DPAD)
+        return;
+
+    float x = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
+    float y = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / 32767.0f;
+    x = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
+    y = y < -1.0f ? -1.0f : (y > 1.0f ? 1.0f : y);
+
+    if (controlMode == CONTROL_ANALOG) {
+        controller[1].d1.xAxis = (int8)(x * 127.0f);
+        controller[1].d2.yAxis = (int8)(-y * 127.0f);
+        return;
+    }
+
+    // Dead zone, then a squared response: small movements for fine aim, the
+    // full throw for a fast spin.
+    constexpr float deadZone = 0.12f;
+    float drive = 0.0f;
+    if (x > deadZone || x < -deadZone) {
+        const float mag = ((x < 0 ? -x : x) - deadZone) / (1.0f - deadZone);
+        drive = (x < 0 ? -1.0f : 1.0f) * mag * mag;
+    }
+
+    // The game reads an 8-bit count and takes the difference between reads,
+    // a few frames apart, so the knob must not turn more than this per frame
+    // or the difference wraps and the claw jumps backwards.
+    constexpr float maxCountsPerFrame = 40.0f;
+    const float target = drive * maxCountsPerFrame * spinnerSensitivity * spinnerDirection;
+    if (drive != 0.0f) {
+        // Driven: the flywheel is brought up to speed, slower when heavier.
+        const float grip = 1.0f - 0.85f * spinnerInertia;
+        spinnerVelocity += (target - spinnerVelocity) * grip;
+    } else {
+        // Coasting: friction only.
+        const float keep = (spinnerInertia <= 0.0f) ? 0.0f : 0.60f + 0.39f * spinnerInertia;
+        spinnerVelocity *= keep;
+        if (spinnerVelocity > -0.05f && spinnerVelocity < 0.05f)
+            spinnerVelocity = 0.0f;
+    }
+    if (spinnerVelocity > maxCountsPerFrame) spinnerVelocity = maxCountsPerFrame;
+    if (spinnerVelocity < -maxCountsPerFrame) spinnerVelocity = -maxCountsPerFrame;
+
+    // Mouse or trackpad: straight onto the knob, no flywheel of ours.
+    float mouse = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X) * 1.5f * spinnerSensitivity * spinnerDirection;
+    if (mouse > maxCountsPerFrame) mouse = maxCountsPerFrame;
+    if (mouse < -maxCountsPerFrame) mouse = -maxCountsPerFrame;
+
+    spinnerPosition += spinnerVelocity + mouse;
+    controller[1].d5.spinner1 = (int8)(uint8)((long long)spinnerPosition & 0xFF);
+}
+
 // Core options (see retro_set_environment). Called once the game is loaded,
 // after nuance.cfg has been read, and again whenever the frontend says an
 // option has changed.
@@ -308,6 +393,31 @@ static void ApplyCoreOptions()
             VideoReinstallShaders();
         }
     }
+    var = { "nuance_controller", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
+        const int mode = !strcmp(var.value, "spinner") ? CONTROL_SPINNER : (!strcmp(var.value, "analog stick") ? CONTROL_ANALOG : CONTROL_DPAD);
+        const uint32 properties = KEYBOARD_JOYSTICK_PROPERTIES | (mode == CONTROL_SPINNER ? CTRLR_QUADSPINNER1 : 0) | (mode == CONTROL_ANALOG ? CTRLR_ANALOG1 : 0);
+        if (mode != controlMode || properties != nuonControllerProperties) {
+            controlMode = mode;
+            nuonControllerProperties = properties;
+            spinnerVelocity = 0.0f;
+            if (controller) {
+                // A different controller has been plugged in, as far as the game can tell.
+                controller[1].d1.xAxis = 0;
+                controller[1].d2.yAxis = 0;
+                controller[1].config = SwapBytes((uint32)CONTROLLER_CHANGED_BIT | properties);
+            }
+        }
+    }
+    var = { "nuance_spinner_sensitivity", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        spinnerSensitivity = atoi(var.value) / 100.0f;
+    var = { "nuance_spinner_inertia", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        spinnerInertia = atoi(var.value) / 100.0f;
+    var = { "nuance_spinner_invert", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+        spinnerDirection = !strcmp(var.value, "reversed") ? -1.0f : 1.0f;
     var = { "nuance_max_fps", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "config file") != 0) {
         const int fps = atoi(var.value); // "unlimited" reads as 0
@@ -331,6 +441,10 @@ void retro_set_environment(retro_environment_t cb)
     static const struct retro_variable variables[] = {
         { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
         { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
+        { "nuance_controller", "Controller; d-pad only|spinner|analog stick" },
+        { "nuance_spinner_sensitivity", "Spinner sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
+        { "nuance_spinner_inertia", "Spinner weight (inertia); 50%|0%|10%|20%|30%|40%|60%|70%|80%|90%|100%" },
+        { "nuance_spinner_invert", "Spinner direction; normal|reversed" },
         { nullptr, nullptr }
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)variables);
@@ -499,6 +613,7 @@ bool retro_load_game(const struct retro_game_info *game)
     }
 
     log_printf("libretro: nuonEnv.Init()...\n"); fflush(stderr);
+    ApplyCoreOptions(); // the controller's kind has to be known before the BIOS sets it up
     nuonEnv.Init();
     log_printf("libretro: nuonEnv.Init() done\n"); fflush(stderr);
     ApplyCoreOptions();
@@ -852,6 +967,7 @@ void retro_run(void)
     input_poll_cb();
     uint16 buttons = GetInputButtons();
     ApplyControllerState(1, buttons);
+    ApplyAnalogControls();
 
     // NUANCE_PERF=1 in the environment: every 300 frames, log how many packets
     // each MPE executed per second of wall time. The one number that says how
