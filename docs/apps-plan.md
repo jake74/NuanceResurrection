@@ -80,6 +80,30 @@ Three layers:
 - **No config file dependency.** The apps set options through the interface
   instead of shipping and editing `nuance.cfg`.
 
+Status of these, 2026-11-15 (fork commit after `90dcce4`):
+
+- **Scanlines:** done. Core option `nuance_scanlines` (`config file`,
+  `enabled`, `disabled`), applied to the running game by reinstalling the
+  fragment shader. Checked from a start-up value; the live change has not
+  been exercised from a frontend yet.
+- **Frame cap:** done. Core option `nuance_max_fps` (`config file`,
+  `unlimited`, `30`, `20`, `15`).
+- **Saves:** done for the emulated flash memory. One file per game,
+  `<game>.nuonsave`, in the frontend's save directory, written within five
+  seconds of a change and on unload. **Open question:** Tempest 3000 wrote
+  nothing to flash in any session so far, including scripted games played
+  to game over, so where it keeps high scores, and whether the emulator
+  supports that at all, is not known yet.
+- **No config file:** done. The core runs from a system directory holding
+  only the three BIOS files; the Arm64 compiler is on by default on Macs.
+- **Analog input:** not started.
+
+Found on the way: the core extracts `nuon.run` to a new directory under
+`/tmp` on every load and only removes it in `retro_deinit`, so a frontend
+that is killed leaves 5 MB behind each time (153 directories had built up
+here). The host layer should unload the core properly, and the extraction
+should be looked at.
+
 ### Features
 
 - **Library.** The user picks a folder; the app keeps access to it across

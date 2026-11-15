@@ -103,6 +103,7 @@ void FlashEEPROM::WriteData(uint32 address, uint32 data1)
       {
         //Cannot turn 0's to 1's, only 1's to 0's (0e op 0w: 0e, 0e op 1w: 0e, 1e op 0w: 0e, 1e op 1w: 1e)
         eeprom[address] &= data1;
+        bDirty = true;
       }
       mode = eFlashMode::FlashMode_Read;
       errorMode = eFlashMode::FlashMode_Read;
@@ -250,6 +251,7 @@ void FlashEEPROM::EraseSector(uint32 address)
 
   if(!IsSectorLocked(address))
   {
+    bDirty = true;
     uint8 *pEEPROM = &eeprom[address];
     for(uint32 i = 0; i < sectorSize; i++)
     {
@@ -288,6 +290,31 @@ void FlashEEPROM::LoadFromFile(const char * const fileName)
       eeprom[i] = (uint8)(fgetc(inFile));
     }
     fclose(inFile);
+  }
+}
+
+void FlashEEPROM::UseSaveFile(const char * const fileName, const char * const legacyFileName)
+{
+  strncpy(saveFileName, fileName, sizeof(saveFileName) - 1);
+  saveFileName[sizeof(saveFileName) - 1] = 0;
+
+  FILE *probe;
+  if(fopen_s(&probe,fileName,"rb") == 0)
+  {
+    fclose(probe);
+    LoadFromFile(fileName);
+  }
+  else if(legacyFileName)
+    LoadFromFile(legacyFileName);
+  bDirty = false;
+}
+
+void FlashEEPROM::SaveIfChanged()
+{
+  if(bDirty && saveFileName[0])
+  {
+    bDirty = false; // before the write: a change made meanwhile is saved next time
+    SaveToFile(saveFileName);
   }
 }
 

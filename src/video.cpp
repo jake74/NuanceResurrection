@@ -459,6 +459,13 @@ void IncrementVideoFieldCounter()
   }
 }
 
+// The fragment shader depends on nuonEnv.bUseCRTshader. After changing that,
+// call this and the next frame installs the right one.
+void VideoReinstallShaders()
+{
+  bShadersInstalled = false;
+}
+
 void VideoInvalidateGLState()
 {
   // The GL context was (re)created, so every GL object name created by the

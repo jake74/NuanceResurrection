@@ -294,6 +294,27 @@ static void context_destroy(void)
     VideoInvalidateGLState();
 }
 
+// Core options (see retro_set_environment). Called once the game is loaded,
+// after nuance.cfg has been read, and again whenever the frontend says an
+// option has changed.
+void VideoReinstallShaders(); // video.cpp
+static void ApplyCoreOptions()
+{
+    struct retro_variable var = { "nuance_scanlines", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "config file") != 0) {
+        const bool bWanted = strcmp(var.value, "enabled") == 0;
+        if (bWanted != nuonEnv.bUseCRTshader) {
+            nuonEnv.bUseCRTshader = bWanted;
+            VideoReinstallShaders();
+        }
+    }
+    var = { "nuance_max_fps", nullptr };
+    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "config file") != 0) {
+        const int fps = atoi(var.value); // "unlimited" reads as 0
+        nuonEnv.minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
+    }
+}
+
 // --- Libretro API ---
 
 void retro_set_environment(retro_environment_t cb)
@@ -304,6 +325,15 @@ void retro_set_environment(retro_environment_t cb)
         log_cb = logging.log;
     bool no_game = false;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_game);
+
+    // Core options, so that a frontend can set these without a nuance.cfg.
+    // "config file" leaves the value from nuance.cfg (or the built-in default).
+    static const struct retro_variable variables[] = {
+        { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
+        { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
+        { nullptr, nullptr }
+    };
+    cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)variables);
 
     static struct retro_input_descriptor desc[] = {
         { 0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_UP, "D-Pad Up" },
@@ -471,6 +501,26 @@ bool retro_load_game(const struct retro_game_info *game)
     log_printf("libretro: nuonEnv.Init()...\n"); fflush(stderr);
     nuonEnv.Init();
     log_printf("libretro: nuonEnv.Init() done\n"); fflush(stderr);
+    ApplyCoreOptions();
+
+    // Saves (the emulated flash memory, where games keep high scores and
+    // progress): one file per game in the frontend's save directory. Without
+    // a save directory, FlashEEPROM.bin beside the BIOS files as before - which
+    // is also where a save from before this was per game is picked up from.
+    {
+        const char* saveDir = nullptr;
+        environ_cb(RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY, &saveDir);
+        std::string name = game->path;
+        const size_t slash = name.find_last_of("/\\");
+        if (slash != std::string::npos) name = name.substr(slash + 1);
+        const size_t dot = name.find_last_of('.');
+        if (dot != std::string::npos && dot > 0) name = name.substr(0, dot);
+        char cwd[1024] = {};
+        const std::string legacy = std::string(getcwd(cwd, sizeof(cwd)) ? cwd : ".") + "/FlashEEPROM.bin";
+        const std::string saveFile = (saveDir && *saveDir) ? std::string(saveDir) + "/" + name + ".nuonsave" : legacy;
+        nuonEnv.flashEEPROM.UseSaveFile(saveFile.c_str(), legacy.c_str());
+        log_printf("libretro: saves in %s\n", saveFile.c_str());
+    }
 
 #ifdef USE_A64_JIT
     // The Arm64 emitter is opt-in. When asked for, prove on this machine that
@@ -542,6 +592,7 @@ bool retro_load_game_special(unsigned, const struct retro_game_info*, size_t) { 
 void retro_unload_game(void)
 {
     StopEmuThread();
+    nuonEnv.flashEEPROM.SaveIfChanged();
     bRun = false;
     game_loaded = false;
     VideoCleanup();
@@ -785,6 +836,17 @@ struct EmuPause
 void retro_run(void)
 {
     if (!game_loaded) return;
+
+    {
+        bool bOptionsChanged = false;
+        if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &bOptionsChanged) && bOptionsChanged)
+            ApplyCoreOptions();
+        // A changed save reaches the disk within a few seconds, not only when
+        // the game is unloaded: an app can be killed without warning.
+        static unsigned saveCheck = 0;
+        if ((++saveCheck % 300) == 0)
+            nuonEnv.flashEEPROM.SaveIfChanged();
+    }
 
     // Input
     input_poll_cb();
