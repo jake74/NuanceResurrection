@@ -151,6 +151,13 @@ that is killed leaves 5 MB behind each time (153 directories had built up
 here). The host layer should unload the core properly, and the extraction
 should be looked at.
 
+Phase 1's host layer exists as of 2026-11-15 in nagori3k (`host/`,
+`mac/nagori_cli.mm`, `build.sh`). A scripted run through it reached level
+one of Tempest 3000 at 30 game frames a second with the Arm64 compiler on,
+audio arriving at the right rate and the core's picture correct in the
+host's frame buffer. Not yet checked by a person: the picture as drawn in
+the window, the sound by ear, and a real controller.
+
 ### Features
 
 - **Library.** The user picks a folder; the app keeps access to it across
