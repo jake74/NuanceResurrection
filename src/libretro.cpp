@@ -561,22 +561,50 @@ static void RunEmulation(const bool bThreaded)
     static int init_frames = 0;
     const uint64 frame_budget_us = (init_frames < 100) ? 50000 : 16000;
     init_frames++;
+    // No MPE runs faster than the real one: an Aries MPE executes at most one
+    // packet per cycle of its 54 MHz clock. Games that do not wait for the
+    // display, Tempest 3000 among them, otherwise play too fast once the host
+    // can outrun the hardware. Each MPE earns packets with elapsed time and
+    // sits out its turns while it has none, which also leaves the host's time
+    // to the MPEs that are behind. NUANCE_MPE_HZ=<packets per second>
+    // changes the rate; 0 removes the limit.
+    static const int64_t mpeHz = getenv("NUANCE_MPE_HZ") ? atoll(getenv("NUANCE_MPE_HZ")) : 54000000;
+    static int64_t mpeCredit[4] = { 1, 1, 1, 1 };
+    static uint64 mpeCreditTime = useconds_since_start();
     while (bRun && (bThreaded ? (!emuMainWants.load(std::memory_order_relaxed) && !emuThreadStop.load(std::memory_order_relaxed)) : !nuonEnv.trigger_render_video))
     {
         cycles++;
 
+        // MPE3 takes its turn only in a round where all the others take theirs.
+        // Tempest 3000 hangs if MPE3 gains on another MPE (see bMPE3PacketHack),
+        // which it would if it kept running while they sat out. It ends up
+        // slower than without the limit; the game's frame rate does not notice.
+        const bool bOthersRun = !mpeHz || (mpeCredit[0] > 0 && mpeCredit[1] > 0 && mpeCredit[2] > 0);
+        // Nothing to run until more time has passed: go and look at the clock.
+        const bool bIdleRound = mpeHz && mpeCredit[0] <= 0 && mpeCredit[1] <= 0 && mpeCredit[2] <= 0;
         for (int i = 3; i >= 0; --i)
-            if (i != 3 || nuonEnv.MPE3wait_fieldCounter == 0) {
+            if ((i == 3) ? (bOthersRun && nuonEnv.MPE3wait_fieldCounter == 0) : (!mpeHz || mpeCredit[i] > 0)) {
                 nuonEnv.mpe[i].FetchDecodeExecute();
                 perf_packets[i] += nuonEnv.mpe[i].cycleCounter;
+                mpeCredit[i] -= nuonEnv.mpe[i].cycleCounter;
             }
 
         if (nuonEnv.pendingCommRequests)
             DoCommBusController();
 
-        if ((cycles % 5000) == 0)
+        if ((cycles % 5000) == 0 || bIdleRound)
         {
+            if (bIdleRound && bThreaded)
+                usleep(50);
             const uint64 new_time = useconds_since_start();
+            if (mpeHz) {
+                // At most 4 ms of credit, so a stall is not followed by a burst.
+                const int64_t earned = (int64_t)((new_time - mpeCreditTime) * (uint64)mpeHz / 1000000);
+                const int64_t most = (int64_t)mpeHz / 250;
+                for (int i = 0; i < 4; i++)
+                    mpeCredit[i] = (mpeCredit[i] + earned > most) ? most : mpeCredit[i] + earned;
+                mpeCreditTime = new_time;
+            }
             // On its own thread the emulation has no frame to return for; it only
             // stops when the frontend has stopped asking for frames (paused, or
             // in its menu), so that a paused game does not run on.

@@ -467,6 +467,32 @@ RetroArch closes its `--log-file` when a game is started from its menu with
 a core override in place. `NUANCE_LOG_FILE=<path>` makes the core append its
 own log lines to a file as well.
 
+### Too fast: a limit at hardware speed (2026-11-15)
+
+After the changes above Jake found the game, if anything, too fast. The log
+agreed: in quiet scenes all three rendering MPEs ran at 60-70 million packets
+a second. Nothing had ever limited them; the emulation ran as fast as the host
+allowed, and Tempest 3000 does not wait for the display.
+
+`RunEmulation` now gives each MPE packets at 54 million a second (one per
+cycle of the 54 MHz clock, the most a real MPE can do; `NUANCE_MPE_HZ`
+changes it, 0 removes the limit). An MPE with none left sits out its turns,
+so host time an MPE would spend ahead of the hardware, MPE0's wait loop
+above all, goes to the MPEs that are behind. When none of the three has any
+left the thread sleeps for 50 microseconds.
+
+MPE3 needed care. Letting it run whenever any other MPE ran raised it from
+about 11 to 20-30 million packets a second and the game hung or crawled, the
+same sensitivity as with extra MPE3 turns. It now takes a turn only in rounds
+where all three others do, which leaves it at 7-8 million; the frame rate is
+the same as with MPE3 at 20 million, so MPE3 is not what limits the game.
+
+Level one, scripted: MPE0 and MPE1 sit at 54 million, MPE2 at 40-45 (it is
+not busy all the time), `VidSync` about 35 a second.
+
+The per-MPE figures in the perf log occasionally show twice the real value
+(108 for 54): the counters are read from another thread without a lock.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along
