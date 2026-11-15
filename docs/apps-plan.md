@@ -191,6 +191,29 @@ process works, and in full screen the toolbar is gone. Confirmed by Jake:
 the picture and the controller in the bare player. Still for Jake to try:
 the Game settings tab, remapping, switching games, the full-screen keys.
 
+Added since, the same day, all at Jake's request:
+
+- The title bar sits above the picture, not over it, with full-screen and
+  options buttons at its right-hand end.
+- Scanlines are off unless asked for.
+- With stretching on, full screen stops at 16:9 on a wider display
+  (a setting, on by default; measured 2560x1440 on his 3440x1440 screen).
+- The frame rate limit is a choice of uncapped, 30, 24 or 20. The core's
+  limit was a whole number of fields per frame and now keeps a fractional
+  schedule, so 24 is frames of three and two fields in turn.
+- The d-pad works on every screen with the stick enabled (see the spinner
+  notes above), and the README says to enter initials with the d-pad and
+  why. Jake confirmed name entry works with the d-pad.
+- Trigger steering: left and right analogue triggers turn the claw through
+  the same flywheel, faster the harder they are squeezed. Jake's verdict:
+  great. The triggers stop pressing their mapped buttons while it is on.
+- Settings are two tabs: Game (picture, Tempest 3000) and Controls
+  (analogue inputs, then the button mapping).
+
+Confirmed by Jake so far: picture, controller, d-pad name entry, trigger
+steering, stick weight of 70%. Not yet reported on: remapping, switching
+games, the full-screen keys, the layout of the settings tabs.
+
 Not done: an Xcode project, Developer ID signing with the allow-jit
 entitlement, notarisation, an app icon. Only `.iso` and `.chd` load;
 Jake's other titles are `.mdf` or `.zip`, which the core does not read.
