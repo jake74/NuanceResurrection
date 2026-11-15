@@ -968,6 +968,43 @@ void retro_run(void)
     uint16 buttons = GetInputButtons();
     ApplyControllerState(1, buttons);
     ApplyAnalogControls();
+    {
+        // NUANCE_DUMP_RAM=<path prefix>[,<frame>,<frame>...]: write main and system
+        // bus RAM to <prefix>-<frame>.bin at those frames, or every twenty
+        // seconds when no frames are given. For finding where a game keeps
+        // something.
+        static const char* const dumpSpec = getenv("NUANCE_DUMP_RAM");
+        static unsigned dumpFrame = 0;
+        if (dumpSpec) {
+            ++dumpFrame;
+            std::string spec = dumpSpec;
+            size_t comma = spec.find(',');
+            if (comma == std::string::npos) {
+                // No frames given: every twenty seconds.
+                if ((dumpFrame % 1200) == 0) {
+                    spec += "," + std::to_string(dumpFrame);
+                    comma = spec.find(',');
+                }
+            }
+            if (comma != std::string::npos) {
+                const std::string prefix = spec.substr(0, comma);
+                size_t pos = comma;
+                while (pos != std::string::npos) {
+                    if ((unsigned)atoi(spec.c_str() + pos + 1) == dumpFrame) {
+                        const bool bHeld = HoldEmuThread();
+                        const std::string name = prefix + "-" + std::to_string(dumpFrame) + ".bin";
+                        if (FILE* f = fopen(name.c_str(), "wb")) {
+                            fwrite(nuonEnv.mainBusDRAM, 1, MAIN_BUS_SIZE, f);
+                            fwrite(nuonEnv.systemBusDRAM, 1, SYSTEM_BUS_SIZE, f);
+                            fclose(f);
+                        }
+                        if (bHeld) ReleaseEmuThread();
+                    }
+                    pos = spec.find(',', pos + 1);
+                }
+            }
+        }
+    }
 
     // NUANCE_PERF=1 in the environment: every 300 frames, log how many packets
     // each MPE executed per second of wall time. The one number that says how
