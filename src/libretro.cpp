@@ -173,6 +173,61 @@ const char* InputManager::InputTypeToStr(InputType type) {
     switch (type) { case KEY: return "KEY"; case JOYBUT: return "JOYBUT"; case JOYAXIS: return "JOYAXIS"; case JOYPOV: return "JOYPOV"; default: return ""; }
 }
 
+// NUANCE_INPUT_SCRIPT="<from>-<to>:<what>;<from>-<to>:<what>;...": scripted input
+// for unattended tests, by game frame (the count of the game's VidSync calls). <what> is button names joined with
+// '+' (start a b left right up down) and/or x=<-100..100> for the left stick.
+// Example: "450-460:start;800-830:x=60;900-910:left".
+struct ScriptedInput { int from, to; uint16 buttons; int stickX; bool bHasStick; };
+static std::vector<ScriptedInput> inputScript;
+static int inputScriptFrame = 0;
+static bool scriptStickActive = false;
+static float scriptStickX = 0.0f;
+static void LoadInputScript()
+{
+    const char* const spec = getenv("NUANCE_INPUT_SCRIPT");
+    if (!spec || !inputScript.empty()) return;
+    std::string s = spec;
+    size_t pos = 0;
+    while (pos < s.size()) {
+        size_t end = s.find(';', pos);
+        if (end == std::string::npos) end = s.size();
+        const std::string seg = s.substr(pos, end - pos);
+        ScriptedInput in = {};
+        const size_t colon = seg.find(':');
+        if (colon != std::string::npos && sscanf(seg.c_str(), "%d-%d", &in.from, &in.to) == 2) {
+            const std::string what = seg.substr(colon + 1);
+            if (what.find("start") != std::string::npos) in.buttons |= CTRLR_BUTTON_START;
+            if (what.find("left") != std::string::npos)  in.buttons |= CTRLR_DPAD_LEFT;
+            if (what.find("right") != std::string::npos) in.buttons |= CTRLR_DPAD_RIGHT;
+            if (what.find("up") != std::string::npos)    in.buttons |= CTRLR_DPAD_UP;
+            if (what.find("down") != std::string::npos)  in.buttons |= CTRLR_DPAD_DOWN;
+            if (what == "a" || what.find("+a") != std::string::npos || what.compare(0, 2, "a+") == 0) in.buttons |= CTRLR_BUTTON_A;
+            if (what == "b" || what.find("+b") != std::string::npos || what.compare(0, 2, "b+") == 0) in.buttons |= CTRLR_BUTTON_B;
+            const size_t x = what.find("x=");
+            if (x != std::string::npos) { in.bHasStick = true; in.stickX = atoi(what.c_str() + x + 2); }
+            inputScript.push_back(in);
+        }
+        pos = end + 1;
+    }
+}
+static uint16 ScriptedButtons()
+{
+    LoadInputScript();
+    // The clock is the game's own frame count, not ours: how long the game
+    // takes to boot varies with the disc, and a script timed in host frames
+    // lands on a different screen from one run to the next.
+    extern unsigned perfVidSyncTotal;
+    inputScriptFrame = (int)perfVidSyncTotal;
+    uint16 buttons = 0;
+    scriptStickActive = false;
+    for (const ScriptedInput& in : inputScript)
+        if (inputScriptFrame >= in.from && inputScriptFrame <= in.to) {
+            buttons |= in.buttons;
+            if (in.bHasStick) { scriptStickActive = true; scriptStickX = in.stickX / 100.0f; }
+        }
+    return buttons;
+}
+
 static void ApplyControllerState(unsigned int controllerIdx, uint16 buttons)
 {
     if (controller)
@@ -229,7 +284,7 @@ static uint16 GetInputButtons()
         if ((++autoPressFrame % autoPress) < 10)
             buttons |= (startUntil && autoPressFrame > startUntil) ? (autoButtons & ~CTRLR_BUTTON_START) : autoButtons;
     }
-    return buttons;
+    return buttons | ScriptedButtons();
 }
 
 static void context_reset(void)
@@ -294,21 +349,42 @@ static void context_destroy(void)
     VideoInvalidateGLState();
 }
 
-// Analog controls. A NUON controller can carry an analog stick or a
-// quadrature spinner besides its buttons, and Tempest 3000 reads both. The
-// spinner is the interesting one: the arcade Tempest was played with a
-// weighted rotary knob, and "spinner" here is that knob driven from a
-// gamepad. The left stick pushes a flywheel round - the further over, the
-// faster it is driven - and the flywheel keeps turning for a moment when the
-// stick is let go, the more so the heavier it is set. A mouse or trackpad
-// turns it directly: that already is a hand on a knob.
+// Analog controls.
+//
+// The arcade Tempest was played with a weighted rotary knob, and the aim here
+// is that feel from a gamepad's analog stick: the left stick pushes a flywheel
+// round - the further over, the faster it is driven - and the flywheel keeps
+// turning for a moment when the stick is let go, the more so the heavier it is
+// set. A mouse or trackpad turns it directly: that already is a hand on a knob.
+//
+// The flywheel reaches Tempest 3000 as a quadrature spinner, which a NUON
+// controller can carry and the game reads. What follows was measured with
+// scripted input and a trace of the claw's position (NUANCE_INPUT_SCRIPT,
+// NUANCE_T3K_TRACE):
+//
+//  - The spinner is an 8-bit count. The game takes the difference between
+//    one of its frames and the next, and acts on it two or three frames
+//    later. A rising count moves the claw the same way as d-pad right.
+//  - It is a coarse knob. Each count moves the claw about 0.07 of a lane, up
+//    to 15/16 of a lane per frame, which about 13 counts reach; at 30 frames
+//    a second that is 28 lanes a second, a little faster than holding the
+//    d-pad. More counts than that do nothing more, and a hundred in one frame
+//    are sometimes ignored. When the count stops, the game eases the claw to
+//    rest over three frames by itself.
+//  - The difference must stay under 128 or it wraps and reads as a turn the
+//    other way.
+//
+// The first version of this fed 40 counts every 60 Hz frame at full stick:
+// any push at all was full speed, and when the game's frame rate dropped the
+// difference wrapped and the claw ran backwards for a moment. Now the flywheel
+// turns at up to 14 counts per game frame, and the turn is handed over once
+// per game frame (the game's VidSync call marks one). Fractions carry over,
+// so a quarter of a count a frame is one count every fourth frame: about half
+// a lane a second, for fine aim.
+//
+// The d-pad on the controller itself always works as well: it is passed
+// through untouched, and the game takes both.
 // (The libretro.h in this tree is a cut-down one; these are the standard values.)
-#ifndef RETRO_DEVICE_MOUSE
-#define RETRO_DEVICE_MOUSE 2
-#endif
-#ifndef RETRO_DEVICE_ANALOG
-#define RETRO_DEVICE_ANALOG 5
-#endif
 #ifndef RETRO_DEVICE_INDEX_ANALOG_LEFT
 #define RETRO_DEVICE_INDEX_ANALOG_LEFT 0
 #define RETRO_DEVICE_ID_ANALOG_X 0
@@ -318,13 +394,17 @@ static void context_destroy(void)
 #define RETRO_DEVICE_ID_MOUSE_X 0
 #endif
 extern uint32 nuonControllerProperties; // joystick.cpp
-enum { CONTROL_DPAD, CONTROL_SPINNER, CONTROL_ANALOG };
+extern unsigned perfVidSyncTotal;       // video.cpp: game frames drawn
+enum { CONTROL_DPAD, CONTROL_STICK, CONTROL_NUON_ANALOG };
 static int controlMode = CONTROL_DPAD;
-static float spinnerSensitivity = 1.0f; // 1 = full stick turns the knob about one revolution of a 16-lane web a second
+static float spinnerSensitivity = 1.0f; // 1 = full stick is the fastest the game moves the claw
 static float spinnerInertia = 0.5f;     // 0 = stops with the stick, 1 = barely slows
 static float spinnerDirection = 1.0f;
-static float spinnerVelocity = 0.0f;    // counts per frame
-static double spinnerPosition = 0.0;    // counts; the game sees the low 8 bits
+static float flywheelSpeed = 0.0f;      // counts per game frame
+static double mouseOwed = 0.0;          // mouse movement since the last game frame, in counts
+static double turnOwed = 0.0;           // counts turned but not yet handed to the game
+static double spinnerCount = 0.0;       // the game sees the low 8 bits
+static unsigned turnGameFrame = 0;
 
 static void ApplyAnalogControls()
 {
@@ -333,17 +413,17 @@ static void ApplyAnalogControls()
 
     float x = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X) / 32767.0f;
     float y = input_state_cb(0, RETRO_DEVICE_ANALOG, RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y) / 32767.0f;
+    if (scriptStickActive) x = scriptStickX;
     x = x < -1.0f ? -1.0f : (x > 1.0f ? 1.0f : x);
     y = y < -1.0f ? -1.0f : (y > 1.0f ? 1.0f : y);
 
-    if (controlMode == CONTROL_ANALOG) {
+    if (controlMode == CONTROL_NUON_ANALOG) {
         controller[1].d1.xAxis = (int8)(x * 127.0f);
         controller[1].d2.yAxis = (int8)(-y * 127.0f);
         return;
     }
 
-    // Dead zone, then a squared response: small movements for fine aim, the
-    // full throw for a fast spin.
+    // Dead zone, then a squared response: half stick is a quarter speed.
     constexpr float deadZone = 0.12f;
     float drive = 0.0f;
     if (x > deadZone || x < -deadZone) {
@@ -351,32 +431,37 @@ static void ApplyAnalogControls()
         drive = (x < 0 ? -1.0f : 1.0f) * mag * mag;
     }
 
-    // The game reads an 8-bit count and takes the difference between reads,
-    // a few frames apart, so the knob must not turn more than this per frame
-    // or the difference wraps and the claw jumps backwards.
-    constexpr float maxCountsPerFrame = 40.0f;
-    const float target = drive * maxCountsPerFrame * spinnerSensitivity * spinnerDirection;
+    constexpr float kFullStickCountsPerGameFrame = 14.0f; // just past where the game's response tops out
+    constexpr double kMaxCountsPerRead = 100.0;
+    const float target = drive * kFullStickCountsPerGameFrame * spinnerSensitivity * spinnerDirection;
     if (drive != 0.0f) {
         // Driven: the flywheel is brought up to speed, slower when heavier.
         const float grip = 1.0f - 0.85f * spinnerInertia;
-        spinnerVelocity += (target - spinnerVelocity) * grip;
+        flywheelSpeed += (target - flywheelSpeed) * grip;
     } else {
         // Coasting: friction only.
         const float keep = (spinnerInertia <= 0.0f) ? 0.0f : 0.60f + 0.39f * spinnerInertia;
-        spinnerVelocity *= keep;
-        if (spinnerVelocity > -0.05f && spinnerVelocity < 0.05f)
-            spinnerVelocity = 0.0f;
+        flywheelSpeed *= keep;
+        if (flywheelSpeed > -0.05f && flywheelSpeed < 0.05f)
+            flywheelSpeed = 0.0f;
     }
-    if (spinnerVelocity > maxCountsPerFrame) spinnerVelocity = maxCountsPerFrame;
-    if (spinnerVelocity < -maxCountsPerFrame) spinnerVelocity = -maxCountsPerFrame;
 
     // Mouse or trackpad: straight onto the knob, no flywheel of ours.
-    float mouse = input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X) * 1.5f * spinnerSensitivity * spinnerDirection;
-    if (mouse > maxCountsPerFrame) mouse = maxCountsPerFrame;
-    if (mouse < -maxCountsPerFrame) mouse = -maxCountsPerFrame;
+    mouseOwed += input_state_cb(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_X) * 0.25 * spinnerSensitivity * spinnerDirection;
 
-    spinnerPosition += spinnerVelocity + mouse;
-    controller[1].d5.spinner1 = (int8)(uint8)((long long)spinnerPosition & 0xFF);
+    if (perfVidSyncTotal != turnGameFrame) {
+        turnGameFrame = perfVidSyncTotal;
+        turnOwed += flywheelSpeed + mouseOwed;
+        mouseOwed = 0.0;
+        // What the game cannot take in one read is not kept for later: a knob
+        // that carried on turning after the hand had stopped would feel wrong.
+        if (turnOwed > kMaxCountsPerRead) turnOwed = kMaxCountsPerRead;
+        if (turnOwed < -kMaxCountsPerRead) turnOwed = -kMaxCountsPerRead;
+        const double counts = (double)(long long)turnOwed; // whole counts; the fraction stays owed
+        turnOwed -= counts;
+        spinnerCount += counts;
+        controller[1].d5.spinner1 = (int8)(uint8)((long long)spinnerCount & 0xFF);
+    }
 }
 
 // Tempest 3000's high scores. The game keeps its table in memory and nowhere
@@ -522,12 +607,15 @@ static void ApplyCoreOptions()
     }
     var = { "nuance_controller", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value) {
-        const int mode = !strcmp(var.value, "spinner") ? CONTROL_SPINNER : (!strcmp(var.value, "analog stick") ? CONTROL_ANALOG : CONTROL_DPAD);
-        const uint32 properties = KEYBOARD_JOYSTICK_PROPERTIES | (mode == CONTROL_SPINNER ? CTRLR_QUADSPINNER1 : 0) | (mode == CONTROL_ANALOG ? CTRLR_ANALOG1 : 0);
+        // ("spinner" is what "analog stick" was first called.)
+        const int mode = (!strcmp(var.value, "analog stick") || !strcmp(var.value, "spinner")) ? CONTROL_STICK
+            : (!strncmp(var.value, "NUON analog", 11) ? CONTROL_NUON_ANALOG : CONTROL_DPAD);
+        const uint32 properties = KEYBOARD_JOYSTICK_PROPERTIES | (mode == CONTROL_STICK ? CTRLR_QUADSPINNER1 : 0) | (mode == CONTROL_NUON_ANALOG ? CTRLR_ANALOG1 : 0);
         if (mode != controlMode || properties != nuonControllerProperties) {
             controlMode = mode;
             nuonControllerProperties = properties;
-            spinnerVelocity = 0.0f;
+            flywheelSpeed = 0.0f;
+            turnOwed = 0.0;
             if (controller) {
                 // A different controller has been plugged in, as far as the game can tell.
                 controller[1].d1.xAxis = 0;
@@ -574,11 +662,11 @@ void retro_set_environment(retro_environment_t cb)
         { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
         { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
         { "nuance_t3k_high_scores", "Tempest 3000 high scores; keep|do not keep|erase" },
-        { "nuance_controller", "Controller; d-pad only|spinner|analog stick" },
+        { "nuance_controller", "Controller; d-pad only|analog stick|NUON analog stick (not for Tempest 3000)" },
         { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
-        { "nuance_spinner_sensitivity", "Spinner sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
-        { "nuance_spinner_inertia", "Spinner weight (inertia); 50%|0%|10%|20%|30%|40%|60%|70%|80%|90%|100%" },
-        { "nuance_spinner_invert", "Spinner direction; normal|reversed" },
+        { "nuance_spinner_sensitivity", "Analog stick sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
+        { "nuance_spinner_inertia", "Analog stick weight (inertia); 50%|0%|10%|20%|30%|40%|60%|70%|80%|90%|100%" },
+        { "nuance_spinner_invert", "Analog stick direction; normal|reversed" },
         { nullptr, nullptr }
     };
     cb(RETRO_ENVIRONMENT_SET_VARIABLES, (void*)variables);
@@ -1109,6 +1197,23 @@ void retro_run(void)
     ApplyControllerState(1, buttons);
     ApplyAnalogControls();
     {
+        // NUANCE_T3K_TRACE=<from>,<to>: log the claw's position (in thousandths of a lane, from the game's own
+        // variable) once per game frame
+        // between those game frames, with what the controller was showing.
+        static const char* const traceSpec = getenv("NUANCE_T3K_TRACE");
+        static unsigned traceLast = 0;
+        if (traceSpec && controller && perfVidSyncTotal != traceLast) {
+            traceLast = perfVidSyncTotal;
+            unsigned from = 0, to = 0;
+            if (sscanf(traceSpec, "%u,%u", &from, &to) == 2 && traceLast >= from && traceLast <= to) {
+                // 0x800DC100: the claw's position in lanes, 16.16 fixed point.
+                const int32 pos = (int32)SwapBytes(*(uint32*)&nuonEnv.systemBusDRAM[0x800DC100U & SYSTEM_BUS_VALID_MEMORY_MASK]) * 1000LL / 65536;
+                log_printf("libretro: t3k trace: frame %u pos %d buttons %04X spinner %d\n", traceLast, pos,
+                    (unsigned)SwapBytes(controller[1].buttons), (int)controller[1].d5.spinner1);
+            }
+        }
+    }
+    {
         // NUANCE_DUMP_RAM=<path prefix>[,<frame>,<frame>...]: write main and system
         // bus RAM to <prefix>-<frame>.bin at those frames, or every twenty
         // seconds when no frames are given. For finding where a game keeps
@@ -1294,6 +1399,52 @@ void retro_run(void)
                 log_printf("libretro: frame %u: %s; GL error 0x%04X; framebuffer %u pixels %02X%02X%02X %02X%02X%02X %02X%02X%02X\n",
                     frames, state, (unsigned)err, (unsigned)hw_render.get_current_framebuffer(),
                     px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2], px[2][0], px[2][1], px[2][2]);
+            }
+        }
+        {
+            // NUANCE_SHOT=<path prefix>,<game frame>[,<game frame>...]: save the
+            // picture as <prefix>-<game frame>.bmp when the game has drawn that
+            // many frames. Timed by the game's frames, like the input script.
+            static const char* const shotSpec = getenv("NUANCE_SHOT");
+            static std::vector<unsigned> shotFrames;
+            static std::string shotPrefix;
+            static bool bShotParsed = false;
+            if (shotSpec && !bShotParsed) {
+                bShotParsed = true;
+                std::string s = shotSpec;
+                size_t pos = s.find(',');
+                shotPrefix = s.substr(0, pos);
+                while (pos != std::string::npos) {
+                    shotFrames.push_back((unsigned)atoi(s.c_str() + pos + 1));
+                    pos = s.find(',', pos + 1);
+                }
+            }
+            extern unsigned perfVidSyncTotal;
+            for (unsigned& target : shotFrames) {
+                if (target && perfVidSyncTotal >= target) {
+                    std::vector<unsigned char> px((size_t)FB_WIDTH * FB_HEIGHT * 4);
+                    glReadPixels(0, 0, FB_WIDTH, FB_HEIGHT, GL_BGRA, GL_UNSIGNED_BYTE, px.data());
+                    const std::string name = shotPrefix + "-" + std::to_string(target) + ".bmp";
+                    if (FILE* const f = fopen(name.c_str(), "wb")) {
+                        const unsigned dataSize = FB_WIDTH * FB_HEIGHT * 4, fileSize = 54 + dataSize;
+                        unsigned char h[54] = { 'B','M' };
+                        auto put32 = [&h](int at, unsigned v) { h[at] = v & 255; h[at+1] = (v >> 8) & 255; h[at+2] = (v >> 16) & 255; h[at+3] = v >> 24; };
+                        put32(2, fileSize); put32(10, 54); put32(14, 40); put32(18, FB_WIDTH); put32(22, FB_HEIGHT);
+                        h[26] = 1; h[28] = 32; put32(34, dataSize);
+                        fwrite(h, 1, 54, f);
+                        fwrite(px.data(), 1, dataSize, f);
+                        fclose(f);
+                    }
+                    if (getenv("NUANCE_SHOT_RAM")) { // the memory as well, for comparing runs
+                        if (FILE* const r = fopen((shotPrefix + "-" + std::to_string(target) + ".ram").c_str(), "wb")) {
+                            fwrite(nuonEnv.mainBusDRAM, 1, MAIN_BUS_SIZE, r);
+                            fwrite(nuonEnv.systemBusDRAM, 1, SYSTEM_BUS_SIZE, r);
+                            for (int m = 0; m < 4; m++) fwrite(nuonEnv.mpe[m].dtrom, 1, MPE_LOCAL_MEMORY_SIZE, r);
+                            fclose(r);
+                        }
+                    }
+                    target = 0;
+                }
             }
         }
         emuPause.Release();

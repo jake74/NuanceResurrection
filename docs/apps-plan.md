@@ -97,15 +97,34 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
 - **No config file:** done. The core runs from a system directory holding
   only the three BIOS files; the Arm64 compiler is on by default on Macs.
 - **Analog input:** done, pending Jake's feel test. Core option
-  `nuance_controller`: `d-pad only`, `spinner` or `analog stick`. Tempest
-  3000 reads both a quadrature spinner and an analog stick (checked by
-  feeding each and watching the claw move). The spinner is driven from the
-  left stick through a flywheel model, or directly from a mouse or
-  trackpad; `nuance_spinner_sensitivity` (10%-400%), `nuance_spinner_inertia`
-  (0%-100%) and `nuance_spinner_invert` tune it. The scale is a guess: about
-  300 counts moved the claw two lanes in one test, and the knob is limited
-  to 40 counts a frame because the game takes differences of an 8-bit
-  count. The apps should show sensitivity and weight as sliders.
+  `nuance_controller`: `d-pad only`, `analog stick`, or `NUON analog stick
+  (not for Tempest 3000)`. "Analog stick" drives a flywheel from the left
+  stick (or a mouse) and feeds it to the game as a quadrature spinner, which
+  Tempest 3000 reads; the d-pad keeps working beside it.
+  `nuance_spinner_sensitivity` (10%-400%), `nuance_spinner_inertia`
+  (0%-100%) and `nuance_spinner_invert` tune it; the apps should show the
+  first two as sliders.
+
+  How the game treats the spinner was measured, not guessed, with three
+  test tools now in the core: `NUANCE_INPUT_SCRIPT` (buttons and stick by
+  game frame), `NUANCE_SHOT` (picture and optionally memory at a game
+  frame) and `NUANCE_T3K_TRACE` (the claw's position each game frame; it
+  is a 16.16 lane number at `0x800DC100`, found by comparing memory between
+  runs that differed only in how long the d-pad was held). Results: one
+  count is about 0.14 of a lane; the game moves at most 15/16 of a lane per
+  frame, reached at about 13 counts; it acts three frames after the input
+  and eases to rest by itself; the d-pad accelerates by 0.23 of a lane per
+  frame held and stops when released; both turn the same way.
+
+  The first version fed 40 counts per 60 Hz frame at full stick, which is
+  why Jake found it janky: any push was full speed, and when the frame rate
+  dropped the 8-bit difference wrapped and the claw ran backwards. Now full
+  stick is 14 counts per game frame, handed over once per game frame.
+  Traced at quarter, half and full stick and through a reversal: about 0.7,
+  5 and 28 lanes a second, no backward steps.
+
+  The game's own analog-stick mode (`CTRLR_ANALOG1`) is not usable for
+  Tempest 3000: with it the buttons did not respond at the title screen.
 - **Controller message:** done. Tempest 3000 opens with "your controller
   configuration has changed, please press start" every time, because the
   emulated controller is announced at start-up as newly plugged in. Core
