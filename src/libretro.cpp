@@ -16,6 +16,7 @@
 // this file calls, whether that is GLEW on the desktop or the platform's own
 // GLES headers.
 #include <mutex>
+#include <thread>
 #include <cstdarg>
 #ifdef _WIN32
 #include <direct.h>     // _mkdir
@@ -38,6 +39,8 @@
 #include "Bios.h"
 #include "archive.h"
 #include "NativeCodeCache.h"
+
+extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls; // video.cpp
 
 // GLWindow stubs for libretro (no windowing needed)
 #include "GLWindow.h"
@@ -164,6 +167,16 @@ static uint16 GetInputButtons()
     if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_Y))     buttons |= CTRLR_BUTTON_C_LEFT;
     if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))    buttons |= CTRLR_BUTTON_C_DOWN;
     if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))    buttons |= CTRLR_BUTTON_C_RIGHT;
+
+    // NUANCE_AUTOPRESS=<frames>: hold START for ten frames out of every
+    // <frames>, so an unattended run gets past title and prompt screens.
+    // For benchmarking and automated checks; nobody plays like this.
+    static const int autoPress = getenv("NUANCE_AUTOPRESS") ? atoi(getenv("NUANCE_AUTOPRESS")) : 0;
+    if (autoPress > 10) {
+        static int autoPressFrame = 0;
+        if ((++autoPressFrame % autoPress) < 10)
+            buttons |= CTRLR_BUTTON_START;
+    }
     return buttons;
 }
 
@@ -414,6 +427,11 @@ bool retro_load_game(const struct retro_game_info *game)
         if (!passed) {
             nuonEnv.compilerOptions.bArm64NativeCode = false;
             log_printf("libretro: Arm64 JIT disabled, using the interpreter\n");
+        } else if (const char* const diffTest = getenv("NUANCE_A64_DIFFTEST")) {
+            // <trials>[,<seed>]: check the emitter against the interpreter on random code.
+            unsigned trials = 0, seed = 1;
+            sscanf(diffTest, "%u,%u", &trials, &seed);
+            A64_DiffTest(trials, seed);
         }
     } else {
         log_printf("libretro: Arm64 JIT available but off (set NUANCE_ARM64_JIT=1 or [Arm64NativeCode] to try it)\n");
@@ -471,9 +489,11 @@ void retro_run(void)
     if (perf_enabled && ++perf_frames == 300) {
         const uint64 now = useconds_since_start();
         const double secs = (double)(now - perf_last_time) / 1e6;
-        log_printf("libretro: perf: packets/s MPE0 %.0f MPE1 %.0f MPE2 %.0f MPE3 %.0f total %.0f\n",
+        log_printf("libretro: perf: packets/s MPE0 %.0f MPE1 %.0f MPE2 %.0f MPE3 %.0f total %.0f; game VidSync %.1f/s VidChangeBase %.1f/s\n",
             perf_packets[0] / secs, perf_packets[1] / secs, perf_packets[2] / secs, perf_packets[3] / secs,
-            (perf_packets[0] + perf_packets[1] + perf_packets[2] + perf_packets[3]) / secs);
+            (perf_packets[0] + perf_packets[1] + perf_packets[2] + perf_packets[3]) / secs,
+            perfVidSyncCalls / secs, perfVidChangeBaseCalls / secs);
+        perfVidSyncCalls = perfVidChangeBaseCalls = 0;
 #ifdef USE_A64_JIT
         if (nuonEnv.compilerOptions.bArm64NativeCode) {
             char stats[1024];
@@ -485,6 +505,39 @@ void retro_run(void)
         perf_last_time = now;
         perf_frames = 0;
     }
+
+#ifdef USE_A64_JIT
+    // NUANCE_A64_WATCHDOG=1: if retro_run stops being called for five seconds
+    // while the native emitter is on, say which block was running and stop.
+    // Generated code that never returns leaves no other trace.
+    static volatile unsigned watchdog_frames = 0;
+    static bool watchdog_started = false;
+    if (!watchdog_started && getenv("NUANCE_A64_WATCHDOG") && nuonEnv.compilerOptions.bArm64NativeCode) {
+        watchdog_started = true;
+        std::thread([]() {
+            unsigned last = watchdog_frames, stalled = 0;
+            for (;;) {
+                usleep(1000000);
+                const unsigned now = watchdog_frames;
+                stalled = (now == last) ? stalled + 1 : 0;
+                last = now;
+                if (stalled >= 5) {
+                    // Two looks, a moment apart: the same block still running
+                    // both times is a block that does not return.
+                    for (int look = 0; look < 2; look++) {
+                        log_printf("libretro: Arm64 JIT watchdog: no frame for 5 s; %s native block MPE%u at %08X; pcexec %08X %08X %08X %08X\n",
+                            a64DebugBlockRunning ? "inside" : "last",
+                            (unsigned)a64DebugBlockMpe, (unsigned)a64DebugBlockPc,
+                            nuonEnv.mpe[0].pcexec, nuonEnv.mpe[1].pcexec, nuonEnv.mpe[2].pcexec, nuonEnv.mpe[3].pcexec);
+                        usleep(200000);
+                    }
+                    abort();
+                }
+            }
+        }).detach();
+    }
+    watchdog_frames = watchdog_frames + 1;
+#endif
 
     // Run emulation until video trigger or real-time budget (~16ms for 60fps)
     nuonEnv.trigger_render_video = false;

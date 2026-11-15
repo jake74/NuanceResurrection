@@ -1474,8 +1474,15 @@ void VidSetup(MPE &mpe)
   bCanDisplayVideo = true;
 }
 
+// How often the game asks for the next field and swaps its display buffer.
+// Read and reset by the NUANCE_PERF log in libretro.cpp: the nearest thing to
+// the game's own frame rate that the emulator can see.
+unsigned perfVidSyncCalls = 0;
+unsigned perfVidChangeBaseCalls = 0;
+
 void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] fields (= mpe.regs[0] * 1/60 or 1/50 second), if 0 or -1 just return internal field counter, -2 is internal only
 {
+  perfVidSyncCalls++;
   uint32 fieldCounter = SwapBytes(*((uint32*)&nuonEnv.systemBusDRAM[VIDEO_FIELD_COUNTER_ADDRESS & SYSTEM_BUS_VALID_MEMORY_MASK]));
 
   if ((int)mpe.regs[0] > 0)
@@ -1489,6 +1496,7 @@ void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] field
 
 void VidChangeBase(MPE &mpe)
 {
+  perfVidChangeBaseCalls++;
   const int32 which = mpe.regs[0];
   const int32 dmaflags = mpe.regs[1] | (1U << 13); // always set read bit
   const int32 base = mpe.regs[2];

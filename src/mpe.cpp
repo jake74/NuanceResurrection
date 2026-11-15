@@ -1001,6 +1001,10 @@ inline uint32 MPE::GetPacketDelta(const uint8 *iPtr, uint32 numLevels)
 void MPE::DecompressPacket(const uint8 *iBuffer, InstructionCacheEntry &pICacheEntry, const uint32 options) //!! pICacheEntry is already class member, looks like this is intended here though
 {
   InstructionCacheEntry pStruct;
+  // An encoding the decoders do not recognise can claim an execution unit
+  // without filling in its nuance. Zeroed, that slot reads as an ECU NOP
+  // instead of whatever was on the stack, which was used as a handler index.
+  memset(pStruct.nuances, 0, sizeof(pStruct.nuances));
 
   pStruct.pcexec = pICacheEntry.pcexec;
   pICacheEntry.pcroute = pICacheEntry.pcexec;
@@ -2133,7 +2137,16 @@ bool MPE::FetchDecodeExecute()
       {
         //do
         {
+#ifdef USE_A64_JIT
+          // Where the emulation is, for the NUANCE_A64_WATCHDOG report (libretro.cpp).
+          a64DebugBlockPc = pcexec;
+          a64DebugBlockMpe = mpeIndex;
+          a64DebugBlockRunning = 1;
+#endif
           nativeCodeCacheEntryPoint();
+#ifdef USE_A64_JIT
+          a64DebugBlockRunning = 0;
+#endif
           //blockExecuteCount--;
         }
         //while((pcexec == prevPcexec) && (mpectl & MPECTRL_MPEGO) && !ecuSkipCounter && blockExecuteCount);

@@ -669,7 +669,8 @@ public:
   const char* A64_FailReason() const { return a64FailReason; }
   void A64_BindLabel(uint32 labelIndex);
   asmjit::Label A64_GetLabel(uint32 labelIndex);
-  asmjit::a64::Mem A64_Mem(uintptr_t base, x86IndexReg index, x86ScaleVal scale, int32 disp, uint32 size);
+  // ebx = bankPtrTable[ebx / 4], a 64-bit load (see Emit_LoadBankPtr in EmitMEM.cpp).
+  void A64_LoadBankPtr(uintptr_t table);
 #endif
 
 private:

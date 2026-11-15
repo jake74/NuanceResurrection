@@ -31,8 +31,8 @@ static inline void Emit_LoadBankPtr(EmitterVariables * const vars)
   }
 #endif
 #ifdef USE_A64_JIT
-  // Needs a 64-bit table load of its own; the 32-bit form below would truncate the pointer.
-  cc.A64_Unsupported("LoadBankPtr");
+  // A 64-bit table load of its own; the 32-bit form below would truncate the pointer.
+  cc.A64_LoadBankPtr((uintptr_t)vars->mpe->bankPtrTable);
   return;
 #endif
   // 32-bit: entries are 4 bytes, ebx has index*4, scale=1 -> byte offset = index*4

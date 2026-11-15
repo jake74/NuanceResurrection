@@ -1,7 +1,11 @@
 # Arm64 JIT backend: plan
 
-Status: milestone 1 done (2026-11-14). The backend builds, generated code runs
-on Apple Silicon, and it is off by default. See [Progress](#progress).
+Status (2026-11-15): milestones 1 to 3 are done and most of 4. Every block
+Tempest 3000 and the test disc ask for now compiles to native code, and
+Tempest 3000 runs about three times faster than on the interpreter. The
+emitter is still off by default: instructions that touch memory or change
+control flow run natively but are not yet covered by the differential test.
+See [Progress](#progress).
 
 ## Goal
 
@@ -81,8 +85,12 @@ block (see Progress).
 | `eax`, `ecx`, `edx` | `w9`, `w10`, `w11` | Caller-saved on both sides; handlers already assume calls clobber them |
 | `ebx`, `ebp` | `w19`, `w20` | Callee-saved on x86-64, so handlers rely on them surviving calls |
 | `esi`, `edi` | `x21`, `x22` | Register-file base pointers; callee-saved means no save/restore around calls |
-| `r15` scratch | `x16`, `x17` | Address materialisation and read-modify-write temporaries |
+| `r15` scratch | `x16`, `x17` | Addresses and immediates |
 | `xmm0`-`xmm7` | `v16`-`v23` | Caller-saved, like XMM under System V |
+
+The backend also keeps `w13`-`w15` as temporaries within one primitive, `w8`
+for results it throws away, `w12` for the x86 carry flag when that has to
+live in a register, and `v24`-`v26` as vector scratch.
 
 `PUSHAD`/`POPAD` become a prologue/epilogue saving `x19`-`x22`, `x29`, `x30`.
 `CALLI` moves `w10`/`w11` into `w0`/`w1`, calls through `x16`, and moves `w0`
@@ -140,9 +148,9 @@ back to `w9`.
 | # | Deliverable | Done when | Rough effort |
 |---|---|---|---|
 | 1 (done) | Build and plumbing: CMake option, asmjit AArch64 sources, `MAP_JIT` buffer, block prologue/epilogue, labels, `CALLI`, gates in `mpe.h`/`SuperBlock.h` behind a runtime switch | An empty block and a helper-call block execute on the M4; interpreter remains the default | 2-3 days |
-| 2 | Integer primitives without flags: moves, memory forms, logic, shifts, `BSWAP`, `LEA`, multiplies, sub-registers | Differential harness passes for handlers that produce no flags | 4-5 days |
-| 3 | Flags: tracker, `SETcc`, `JCC`, `CMOVcc`, `ADC`/`SBB`/`RCR`, shift carry-out | Harness passes for all ALU, MUL, ECU and RCU handlers | 4-6 days |
-| 4 | SSE-backed handlers and the rest of MEM | Harness passes for every handler; test disc compiler tests pass; Tempest 3000 boots; first fps number | 3-4 days |
+| 2 (done) | Integer primitives without flags: moves, memory forms, logic, shifts, `BSWAP`, `LEA`, multiplies, sub-registers | Differential harness passes for handlers that produce no flags | 4-5 days |
+| 3 (done) | Flags: tracker, `SETcc`, `JCC`, `CMOVcc`, `ADC`/`SBB`/`RCR`, shift carry-out | Harness passes for all ALU, MUL, ECU and RCU handlers | 4-6 days |
+| 4 (in progress) | SSE-backed handlers and the rest of MEM | Harness passes for every handler; test disc compiler tests pass; Tempest 3000 boots; first fps number | 3-4 days |
 | 5 | Stabilise and measure: more games, cache flush and invalidation paths, enable by default on macOS Arm64 | No regressions against the interpreter in the games tried; README updated | 2-3 days |
 | 6 | Optional: profile and hand-write native Arm64 for the hottest handlers | Decided from Milestone 4/5 numbers | Open-ended |
 
@@ -186,10 +194,84 @@ Things milestone 1 turned up:
   Arm64 builds, where IL blocks had been in use; that is untested there.
 - The x86-64 JIT build still compiles and links (cross-compiled here, not run).
 
-### Next: milestone 2
+### Milestones 2 and 3 (done, 2026-11-15)
 
-Integer primitives without flags, in the order the block statistics give, plus
-8- and 16-bit sub-registers and the differential harness.
+Done together: an x86 arithmetic primitive and its flags are one AArch64
+instruction, so there was nothing to gain from two passes.
+
+- All integer primitives the handlers use: moves, arithmetic and logic in
+  their register, immediate and memory forms, shifts and rotates, double
+  shifts, multiplies, `BSWAP`, `BSR`, `LEA`, `SETcc`, `CMOVcc`, `Jcc`, and 8-
+  and 16-bit sub-registers.
+- Flags are tracked while emitting (`FlagState` in `nativecodecache_a64.cpp`):
+  which of N, Z and V the last operation produced, and whether the carry is in
+  the AArch64 C flag as x86 would have it (after an addition), inverted (after
+  a subtraction), or in a register (after `RCR`). `SETcc`, `Jcc`, `CMOVcc`,
+  `ADC`, `SBB` and `RCR` pick their condition from that, and fail the block if
+  they need a flag the tracker cannot vouch for. Nothing in the handlers
+  currently does.
+- Constants that do not fit 31 bits are handled in 64 bits, as the x86-64
+  emitter does, because some are host pointers.
+- The differential test (`src/a64_difftest.cpp`, run by
+  `tools/a64_difftest_host.c` without a frontend) compiles runs of one to four
+  random packets and compares the 48 registers against the interpreter:
+
+  ```
+  cd build-libretro
+  NUANCE_ARM64_JIT=1 NUANCE_A64_DIFFTEST=100000,1 ./a64_difftest_host ./nuance_libretro.dylib ../NUON.CD
+  ```
+
+  It covers ALU, MUL and RCU instructions. 100% of trials compile natively and
+  700,000 trials over seven seeds show no mismatch. The only differences left
+  are multiplies whose shift field asks for a left shift by 64, which the
+  hardware documentation does not define and C++ leaves undefined in the
+  interpreter; the test counts those separately.
+
+Emitter bugs the test found, present on x86 too and fixed here:
+
+- `mul_sv`/`mul_p` with `>>svshift` used `esi` as a temporary and then stored
+  through it before putting the register-file pointer back (six handlers in
+  `EmitMUL.cpp`).
+- `butt` wrote its second result before reading its first source for the last
+  time, so `butt r9, r21, r8` computed with the wrong r9 (`EmitALU.cpp`).
+- `DecompressPacket` used uninitialised stack as a handler index for encodings
+  the decoders do not recognise. It now zeroes its scratch entry.
+
+### Milestone 4 (in progress)
+
+- Vector primitives are implemented: the 128-bit and scalar moves, `PAND`,
+  `PADDD`, `PSUBD`, `PMULLD`, `PHADDD`, `PSRAD`, `PSLLD`, `PSHUFB`, `SHUFPS`,
+  `UNPCKLPS`, `MOVLHPS`. Arm builds report SSSE3 and SSE4.1 as absent, so the
+  handlers take their integer paths and most of these are not exercised yet.
+- Every block now compiles. Test disc: 6,601 native blocks, none left to the
+  interpreter, all compiler tests pass. Tempest 3000: about 4,000 native
+  blocks, 2 left to the interpreter, boots to its title menu.
+- Tempest 3000 on an M4 Pro, at the title menu (`NUANCE_PERF=1`):
+
+  | | Packets per second | `VidSync` calls per second |
+  |---|---|---|
+  | Interpreter | 33-37 million | 3.2-3.4 |
+  | Arm64 JIT | 80-110 million | 9.6-12 |
+
+  `VidSync` calls are the nearest thing to the game's frame rate the emulator
+  can see. MPE0-2 run about three times faster; MPE3, which the packet hack
+  holds to one packet per block in system-bus code, does not speed up at all
+  (about 9 million packets per second either way) and is now what limits the
+  game.
+- Still to do: extend the differential test to instructions that touch memory
+  and to branches, which is what stands between this and switching the
+  emitter on by default; then gameplay testing, which needs someone at the
+  controller.
+
+Testing aids added along the way, all environment variables:
+`NUANCE_A64_WATCHDOG=1` reports where the emulation is if frames stop for five
+seconds, `NUANCE_AUTOPRESS=<frames>` presses START periodically so an
+unattended run gets past prompts, `NUANCE_A64_DIFFTEST_TRACE=1` names each
+block before the differential test runs it.
+
+One thing to know when testing from a shell on macOS: RetroArch started as a
+background process stops being given frames after a few seconds. Start it
+with `open -n -a RetroArch --env NUANCE_ARM64_JIT=1 --args ...` instead.
 
 ## Scope
 

@@ -37,5 +37,13 @@ void A64_FormatStats(char *buffer, size_t bufferSize);
 // receives one line saying what happened either way.
 bool A64_JitSelfTest(char *message, size_t messageSize);
 
+// The block being executed, for diagnosing a hang inside generated code.
+extern volatile unsigned a64DebugBlockPc;
+extern volatile unsigned a64DebugBlockMpe;
+extern volatile unsigned a64DebugBlockRunning; // 1 while inside the block
+
+// Differential test against the interpreter (a64_difftest.cpp).
+void A64_DiffTest(unsigned trials, unsigned seed);
+
 #endif // USE_A64_JIT
 #endif // A64_EMIT_H

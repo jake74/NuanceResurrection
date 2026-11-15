@@ -228,6 +228,7 @@ set(NUANCE_SOURCES
     $<IF:$<PLATFORM_ID:Windows>,,src/NuanceUI.cpp>
     $<$<BOOL:${NUANCE_X86_64}>:src/asmjit_emit.cpp>
     $<$<BOOL:${NUANCE_ARM64_JIT}>:src/nativecodecache_a64.cpp>
+    $<$<BOOL:${NUANCE_ARM64_JIT}>:src/a64_difftest.cpp>
 )
 
 option(BUILD_LIBRETRO "Build libretro core instead of standalone" OFF)
@@ -378,6 +379,13 @@ endif()
 # For 32-bit static SDL2, provide samplerate stub
 if(EXISTS "/tmp/libsamplerate.a" AND CMAKE_SIZEOF_VOID_P EQUAL 4)
     target_link_libraries(${NUANCE_TARGET} PRIVATE /tmp/libsamplerate.a)
+endif()
+
+# Headless host for the Arm64 JIT differential test (src/a64_difftest.cpp):
+# loads the core without a frontend so the test runs from a shell or in CI.
+if(NUANCE_ARM64_JIT AND BUILD_LIBRETRO)
+    add_executable(a64_difftest_host tools/a64_difftest_host.c)
+    target_link_libraries(a64_difftest_host PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 # Copy required data files to build directory
