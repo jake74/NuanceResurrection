@@ -398,7 +398,7 @@ extern unsigned perfVidSyncTotal;       // video.cpp: game frames drawn
 enum { CONTROL_DPAD, CONTROL_STICK, CONTROL_NUON_ANALOG };
 static int controlMode = CONTROL_DPAD;
 static float spinnerSensitivity = 1.0f; // 1 = full stick is the fastest the game moves the claw
-static float spinnerInertia = 0.5f;     // 0 = stops with the stick, 1 = barely slows
+static float spinnerInertia = 0.7f;     // 0 = stops with the stick, 1 = coasts for most of a second
 static float spinnerDirection = 1.0f;
 static float flywheelSpeed = 0.0f;      // counts per game frame
 static double mouseOwed = 0.0;          // mouse movement since the last game frame, in counts
@@ -440,7 +440,14 @@ static void ApplyAnalogControls()
         flywheelSpeed += (target - flywheelSpeed) * grip;
     } else {
         // Coasting: friction only.
-        const float keep = (spinnerInertia <= 0.0f) ? 0.0f : 0.60f + 0.39f * spinnerInertia;
+        // Up to 70% (the default, chosen by feel) the flywheel keeps 60% to 87%
+        // of its speed each frame. Above that the scale is flattened to end
+        // at 94%: the heaviest setting coasts for most of a second and then
+        // stops. A wheel that never stopped would be the truer model and no
+        // use for playing.
+        const float keep = (spinnerInertia <= 0.0f) ? 0.0f
+            : (spinnerInertia <= 0.7f) ? 0.60f + 0.39f * spinnerInertia
+            : 0.873f + (spinnerInertia - 0.7f) * (0.94f - 0.873f) / 0.3f;
         flywheelSpeed *= keep;
         if (flywheelSpeed > -0.05f && flywheelSpeed < 0.05f)
             flywheelSpeed = 0.0f;
@@ -665,7 +672,7 @@ void retro_set_environment(retro_environment_t cb)
         { "nuance_controller", "Controller; d-pad only|analog stick|NUON analog stick (not for Tempest 3000)" },
         { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
         { "nuance_spinner_sensitivity", "Analog stick sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
-        { "nuance_spinner_inertia", "Analog stick weight (inertia); 50%|0%|10%|20%|30%|40%|60%|70%|80%|90%|100%" },
+        { "nuance_spinner_inertia", "Analog stick weight (inertia); 70%|0%|10%|20%|30%|40%|50%|60%|80%|90%|100%" },
         { "nuance_spinner_invert", "Analog stick direction; normal|reversed" },
         { nullptr, nullptr }
     };
