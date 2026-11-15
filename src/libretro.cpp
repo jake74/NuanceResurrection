@@ -17,6 +17,11 @@
 // GLES headers.
 #include <mutex>
 #include <thread>
+#include <atomic>
+#include <sched.h>
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+#endif
 #include <cstdarg>
 #ifdef _WIN32
 #include <direct.h>     // _mkdir
@@ -42,6 +47,20 @@
 
 extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls, perfVidSyncFields; // video.cpp
 static uint64_t perfAudioFrames = 0;
+static uint64 perf_packets[4] = {}; // packets executed per MPE since the last NUANCE_PERF report
+
+// Emulation thread state (see "Emulation thread" below).
+static std::thread emuThread;
+static bool emuThreaded = false;
+static bool emuThreadWanted = false;
+static std::atomic<bool> emuThreadStop{false};
+static std::atomic<bool> emuMainWants{false};  // the main thread wants the emulation held
+static std::atomic<bool> emuParked{true};      // the emulation thread is not inside RunEmulation
+static std::atomic<uint64_t> emuLastRunCallUs{0};
+static void StartEmuThread();
+static void StopEmuThread();
+static bool HoldEmuThread();    // true if there is a thread and it is now held
+static void ReleaseEmuThread();
 
 // GLWindow stubs for libretro (no windowing needed)
 #include "GLWindow.h"
@@ -169,14 +188,32 @@ static uint16 GetInputButtons()
     if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_L2))    buttons |= CTRLR_BUTTON_C_DOWN;
     if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, RETRO_DEVICE_ID_JOYPAD_R2))    buttons |= CTRLR_BUTTON_C_RIGHT;
 
-    // NUANCE_AUTOPRESS=<frames>: hold START for ten frames out of every
-    // <frames>, so an unattended run gets past title and prompt screens.
-    // For benchmarking and automated checks; nobody plays like this.
-    static const int autoPress = getenv("NUANCE_AUTOPRESS") ? atoi(getenv("NUANCE_AUTOPRESS")) : 0;
+    // NUANCE_AUTOPRESS=<frames>[,<buttons>]: hold the named buttons (START if
+    // none are named; any of start a b left right up down, separated by '+')
+    // for ten frames out of every <frames>, so an unattended run gets past
+    // title and prompt screens and into a game. For benchmarking and
+    // automated checks; nobody plays like this.
+    static int autoPress = -1;
+    static uint16 autoButtons = 0;
+    if (autoPress < 0) {
+        const char* const spec = getenv("NUANCE_AUTOPRESS");
+        autoPress = spec ? atoi(spec) : 0;
+        const char* const names = spec ? strchr(spec, ',') : nullptr;
+        if (!names) autoButtons = CTRLR_BUTTON_START;
+        else {
+            if (strstr(names, "start")) autoButtons |= CTRLR_BUTTON_START;
+            if (strstr(names, "left"))  autoButtons |= CTRLR_DPAD_LEFT;
+            if (strstr(names, "right")) autoButtons |= CTRLR_DPAD_RIGHT;
+            if (strstr(names, "up"))    autoButtons |= CTRLR_DPAD_UP;
+            if (strstr(names, "down"))  autoButtons |= CTRLR_DPAD_DOWN;
+            if (strstr(names, "+a") || strstr(names, ",a")) autoButtons |= CTRLR_BUTTON_A;
+            if (strstr(names, "+b") || strstr(names, ",b")) autoButtons |= CTRLR_BUTTON_B;
+        }
+    }
     if (autoPress > 10) {
         static int autoPressFrame = 0;
         if ((++autoPressFrame % autoPress) < 10)
-            buttons |= CTRLR_BUTTON_START;
+            buttons |= autoButtons;
     }
     return buttons;
 }
@@ -314,6 +351,7 @@ void retro_init(void)
 
 void retro_deinit(void)
 {
+    StopEmuThread();
     log_printf("libretro: retro_deinit\n");
     CleanupArchives();
 }
@@ -322,8 +360,11 @@ void retro_set_controller_port_device(unsigned, unsigned) {}
 
 void retro_reset(void)
 {
+    const bool bHeld = HoldEmuThread();
     for (int i = 0; i < 4; i++)
         nuonEnv.mpe[i].Reset();
+    if (bHeld)
+        ReleaseEmuThread();
 }
 
 bool retro_load_game(const struct retro_game_info *game)
@@ -460,6 +501,18 @@ bool retro_load_game(const struct retro_game_info *game)
     bRun = true;
     game_loaded = true;
 
+    {
+        bool bWantThread = false;
+#ifdef USE_A64_JIT
+        bWantThread = nuonEnv.compilerOptions.bArm64NativeCode;
+#endif
+        if (const char* const choice = getenv("NUANCE_EMU_THREAD"))
+            bWantThread = (atoi(choice) != 0);
+        // Started by the first retro_run, not here: a host that only loads a
+        // game (the differential test's) never needs it.
+        emuThreadWanted = bWantThread;
+    }
+
     log_printf("libretro: game loaded successfully\n");
     return true;
 }
@@ -468,10 +521,201 @@ bool retro_load_game_special(unsigned, const struct retro_game_info*, size_t) { 
 
 void retro_unload_game(void)
 {
+    StopEmuThread();
     bRun = false;
     game_loaded = false;
     VideoCleanup();
 }
+
+// The emulation proper: the four MPEs in turn, the comm bus between them, and
+// the events that happen on the clock (timers, the video field, audio). Called
+// from retro_run once per frame, or - with the emulation thread - run
+// continuously on that thread, where it returns only to let the main thread in
+// or because the frontend has stopped asking for frames.
+static void RunEmulation(const bool bThreaded)
+{
+    nuonEnv.trigger_render_video = false;
+    uint32 cycles = 0;
+    static uint64 last_time0 = useconds_since_start();
+    static uint64 last_time1 = useconds_since_start();
+    static uint64 last_time2 = useconds_since_start();
+    static uint64 last_time3 = useconds_since_start();
+    const uint64 frame_budget_start = useconds_since_start();
+    // During BIOS init (before video is configured), allow longer execution time
+    // Use 100ms budget for first 100 frames to allow BIOS init to complete
+    static int init_frames = 0;
+    const uint64 frame_budget_us = (init_frames < 100) ? 50000 : 16000;
+    init_frames++;
+    while (bRun && (bThreaded ? (!emuMainWants.load(std::memory_order_relaxed) && !emuThreadStop.load(std::memory_order_relaxed)) : !nuonEnv.trigger_render_video))
+    {
+        cycles++;
+
+        for (int i = 3; i >= 0; --i)
+            if (i != 3 || nuonEnv.MPE3wait_fieldCounter == 0) {
+                nuonEnv.mpe[i].FetchDecodeExecute();
+                perf_packets[i] += nuonEnv.mpe[i].cycleCounter;
+            }
+
+        if (nuonEnv.pendingCommRequests)
+            DoCommBusController();
+
+        if ((cycles % 5000) == 0)
+        {
+            const uint64 new_time = useconds_since_start();
+            // On its own thread the emulation has no frame to return for; it only
+            // stops when the frontend has stopped asking for frames (paused, or
+            // in its menu), so that a paused game does not run on.
+            if (bThreaded) {
+                if (new_time - emuLastRunCallUs.load(std::memory_order_relaxed) > 300000)
+                    break;
+            } else
+            // Time-based frame budget: break after ~16ms to return control to retroarch
+            if ((new_time - frame_budget_start) >= frame_budget_us) {
+                static int flog = 0;
+                if (flog < 5) { fprintf(stderr, "FRAME[%d]: %u cycles in %lums budget=%lums\n", init_frames, cycles, (unsigned long)(new_time - frame_budget_start)/1000, (unsigned long)frame_budget_us/1000); flog++; }
+                break;
+            }
+
+            if (nuonEnv.timer_rate[0] > 0 && new_time >= last_time0 + (uint64)nuonEnv.timer_rate[0]) {
+                nuonEnv.ScheduleInterrupt(INT_SYSTIMER0); last_time0 = new_time;
+            } else if (nuonEnv.timer_rate[0] <= 0) last_time0 = new_time;
+
+            if (nuonEnv.timer_rate[1] > 0 && new_time >= last_time1 + (uint64)nuonEnv.timer_rate[1]) {
+                nuonEnv.ScheduleInterrupt(INT_SYSTIMER1); last_time1 = new_time;
+            } else if (nuonEnv.timer_rate[1] <= 0) last_time1 = new_time;
+
+            {
+                // Video field counter update: use timer_rate[2] if set, otherwise default ~60Hz (16667us)
+                const uint64 vidRate = (nuonEnv.timer_rate[2] > 0) ? (uint64)nuonEnv.timer_rate[2] : 16667;
+                if (new_time >= last_time2 + vidRate) {
+                    IncrementVideoFieldCounter();
+                    nuonEnv.TriggerVideoInterrupt();
+                    nuonEnv.trigger_render_video = true;
+                    const uint32 fieldCounter = SwapBytes(*((uint32*)&nuonEnv.systemBusDRAM[VIDEO_FIELD_COUNTER_ADDRESS & SYSTEM_BUS_VALID_MEMORY_MASK]));
+                    if (fieldCounter >= nuonEnv.MPE3wait_fieldCounter)
+                        nuonEnv.MPE3wait_fieldCounter = 0;
+                    last_time2 = new_time;
+                }
+            }
+
+            // Audio: feed the host audio ring (RetroArch drains it via
+            // DrainAudioRing below). Push one Nuon audio period when the game has
+            // re-armed its HALF/WRAP interrupt and INT_AUDIO is not already
+            // pending. The pacing interval is the period's TRUE playback duration
+            // at the Nuon rate (AudioPeriodIntervalUs), not the 60Hz video field:
+            // a period is half the game-chosen DMA buffer (1K..64K), so pacing on
+            // the field overproduces for >4K buffers (RetroArch audio_sync then
+            // throttles the whole frontend -> slowdown) and underruns for <4K.
+            const uint64 audioIntervalUs = nuonEnv.AudioPeriodIntervalUs();
+            if (audioIntervalUs > 0) {
+                if (nuonEnv.pNuonAudioBuffer &&
+                    (new_time >= last_time3 + audioIntervalUs) &&
+                    ((nuonEnv.nuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT)) != (nuonEnv.oldNuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT))) &&
+                    ((((nuonEnv.mpe[0].intsrc & nuonEnv.mpe[0].inten1) | (nuonEnv.mpe[1].intsrc & nuonEnv.mpe[1].inten1) | (nuonEnv.mpe[2].intsrc & nuonEnv.mpe[2].inten1) | (nuonEnv.mpe[3].intsrc & nuonEnv.mpe[3].inten1)) & INT_AUDIO) == 0)) {
+                    if (nuonEnv.TryPushAudioPeriod()) {
+                        // Keep to the schedule, not to when this check happened to run:
+                        // the check is only made every few thousand emulation steps and
+                        // not at all between retro_run calls, so restarting the interval
+                        // from "now" made every period a little late and delivered about
+                        // 8% less audio than playback consumes - audible as gaps. If the
+                        // game has fallen a whole period behind there is nothing to catch
+                        // up to, so start again from here.
+                        last_time3 += audioIntervalUs;
+                        if (new_time - last_time3 >= audioIntervalUs)
+                            last_time3 = new_time;
+                    }
+                }
+            } else last_time3 = new_time;
+        }
+
+        nuonEnv.TriggerScheduledInterrupts();
+    }
+}
+
+// --- Emulation thread ---
+//
+// RetroArch calls retro_run once per display frame and then waits for the
+// display. Run from there, the emulation gets the time between two such waits
+// and no more; on its own thread it gets all of it. retro_run then only reads
+// input, takes the picture and hands over the audio. The picture is taken with
+// the thread held at a step boundary (EmuPause), so the video state it reads is
+// never half-written.
+//
+// On for Arm64 JIT builds when the native emitter is in use; NUANCE_EMU_THREAD=0
+// or =1 in the environment overrides that either way.
+
+static void EmuThreadMain()
+{
+#if defined(__APPLE__)
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); // keep it on a performance core
+#endif
+    while (!emuThreadStop.load()) {
+        const bool paused = (useconds_since_start() - emuLastRunCallUs.load()) > 300000;
+        if (emuMainWants.load() || paused || !bRun) {
+            emuParked.store(true);
+            usleep(paused ? 2000 : 20);
+            continue;
+        }
+        emuParked.store(false);
+        if (emuMainWants.load()) // asked for between the check above and here
+            continue;
+        RunEmulation(true);
+        emuParked.store(true);
+    }
+    emuParked.store(true);
+}
+
+static void StartEmuThread()
+{
+    if (emuThreaded)
+        return;
+    emuThreadStop.store(false);
+    emuMainWants.store(false);
+    emuParked.store(true);
+    emuLastRunCallUs.store(useconds_since_start());
+    emuThreaded = true;
+    emuThread = std::thread(EmuThreadMain);
+}
+
+static void StopEmuThread()
+{
+    if (!emuThreaded)
+        return;
+    emuThreadStop.store(true);
+    emuThread.join();
+    emuThreaded = false;
+}
+
+static bool HoldEmuThread()
+{
+    if (!emuThreaded)
+        return false;
+    emuMainWants.store(true);
+    while (!emuParked.load())
+        sched_yield();
+    return true;
+}
+
+static void ReleaseEmuThread()
+{
+    emuMainWants.store(false);
+}
+
+// Holds the emulation thread at a step boundary for as long as it lives (or
+// until Release). Does nothing when there is no such thread.
+struct EmuPause
+{
+    EmuPause() : bHeld(HoldEmuThread()) {}
+    void Release()
+    {
+        if (bHeld) {
+            ReleaseEmuThread();
+            bHeld = false;
+        }
+    }
+    ~EmuPause() { Release(); }
+    bool bHeld;
+};
 
 void retro_run(void)
 {
@@ -489,7 +733,6 @@ void retro_run(void)
 #ifdef USE_A64_JIT
     a64PerfSampleInterpreted = perf_enabled;
 #endif
-    static uint64 perf_packets[4] = {};
     static uint64 perf_last_time = useconds_since_start();
     static unsigned perf_frames = 0;
     if (perf_enabled && ++perf_frames == 300) {
@@ -574,96 +817,20 @@ void retro_run(void)
     watchdog_frames = watchdog_frames + 1;
 #endif
 
-    // Run emulation until video trigger or real-time budget (~16ms for 60fps)
-    nuonEnv.trigger_render_video = false;
-    uint32 cycles = 0;
-    static uint64 last_time0 = useconds_since_start();
-    static uint64 last_time1 = useconds_since_start();
-    static uint64 last_time2 = useconds_since_start();
-    static uint64 last_time3 = useconds_since_start();
-    const uint64 frame_budget_start = useconds_since_start();
-    // During BIOS init (before video is configured), allow longer execution time
-    // Use 100ms budget for first 100 frames to allow BIOS init to complete
-    static int init_frames = 0;
-    const uint64 frame_budget_us = (init_frames < 100) ? 50000 : 16000;
-    init_frames++;
-    while (bRun && !nuonEnv.trigger_render_video)
-    {
-        cycles++;
-
-        for (int i = 3; i >= 0; --i)
-            if (i != 3 || nuonEnv.MPE3wait_fieldCounter == 0) {
-                nuonEnv.mpe[i].FetchDecodeExecute();
-                perf_packets[i] += nuonEnv.mpe[i].cycleCounter;
-            }
-
-        if (nuonEnv.pendingCommRequests)
-            DoCommBusController();
-
-        if ((cycles % 5000) == 0)
-        {
-            const uint64 new_time = useconds_since_start();
-            // Time-based frame budget: break after ~16ms to return control to retroarch
-            if ((new_time - frame_budget_start) >= frame_budget_us) {
-                static int flog = 0;
-                if (flog < 5) { fprintf(stderr, "FRAME[%d]: %u cycles in %lums budget=%lums\n", init_frames, cycles, (unsigned long)(new_time - frame_budget_start)/1000, (unsigned long)frame_budget_us/1000); flog++; }
-                break;
-            }
-
-            if (nuonEnv.timer_rate[0] > 0 && new_time >= last_time0 + (uint64)nuonEnv.timer_rate[0]) {
-                nuonEnv.ScheduleInterrupt(INT_SYSTIMER0); last_time0 = new_time;
-            } else if (nuonEnv.timer_rate[0] <= 0) last_time0 = new_time;
-
-            if (nuonEnv.timer_rate[1] > 0 && new_time >= last_time1 + (uint64)nuonEnv.timer_rate[1]) {
-                nuonEnv.ScheduleInterrupt(INT_SYSTIMER1); last_time1 = new_time;
-            } else if (nuonEnv.timer_rate[1] <= 0) last_time1 = new_time;
-
-            {
-                // Video field counter update: use timer_rate[2] if set, otherwise default ~60Hz (16667us)
-                const uint64 vidRate = (nuonEnv.timer_rate[2] > 0) ? (uint64)nuonEnv.timer_rate[2] : 16667;
-                if (new_time >= last_time2 + vidRate) {
-                    IncrementVideoFieldCounter();
-                    nuonEnv.TriggerVideoInterrupt();
-                    nuonEnv.trigger_render_video = true;
-                    const uint32 fieldCounter = SwapBytes(*((uint32*)&nuonEnv.systemBusDRAM[VIDEO_FIELD_COUNTER_ADDRESS & SYSTEM_BUS_VALID_MEMORY_MASK]));
-                    if (fieldCounter >= nuonEnv.MPE3wait_fieldCounter)
-                        nuonEnv.MPE3wait_fieldCounter = 0;
-                    last_time2 = new_time;
-                }
-            }
-
-            // Audio: feed the host audio ring (RetroArch drains it via
-            // DrainAudioRing below). Push one Nuon audio period when the game has
-            // re-armed its HALF/WRAP interrupt and INT_AUDIO is not already
-            // pending. The pacing interval is the period's TRUE playback duration
-            // at the Nuon rate (AudioPeriodIntervalUs), not the 60Hz video field:
-            // a period is half the game-chosen DMA buffer (1K..64K), so pacing on
-            // the field overproduces for >4K buffers (RetroArch audio_sync then
-            // throttles the whole frontend -> slowdown) and underruns for <4K.
-            const uint64 audioIntervalUs = nuonEnv.AudioPeriodIntervalUs();
-            if (audioIntervalUs > 0) {
-                if (nuonEnv.pNuonAudioBuffer &&
-                    (new_time >= last_time3 + audioIntervalUs) &&
-                    ((nuonEnv.nuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT)) != (nuonEnv.oldNuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT))) &&
-                    ((((nuonEnv.mpe[0].intsrc & nuonEnv.mpe[0].inten1) | (nuonEnv.mpe[1].intsrc & nuonEnv.mpe[1].inten1) | (nuonEnv.mpe[2].intsrc & nuonEnv.mpe[2].inten1) | (nuonEnv.mpe[3].intsrc & nuonEnv.mpe[3].inten1)) & INT_AUDIO) == 0)) {
-                    if (nuonEnv.TryPushAudioPeriod()) {
-                        // Keep to the schedule, not to when this check happened to run:
-                        // the check is only made every few thousand emulation steps and
-                        // not at all between retro_run calls, so restarting the interval
-                        // from "now" made every period a little late and delivered about
-                        // 8% less audio than playback consumes - audible as gaps. If the
-                        // game has fallen a whole period behind there is nothing to catch
-                        // up to, so start again from here.
-                        last_time3 += audioIntervalUs;
-                        if (new_time - last_time3 >= audioIntervalUs)
-                            last_time3 = new_time;
-                    }
-                }
-            } else last_time3 = new_time;
-        }
-
-        nuonEnv.TriggerScheduledInterrupts();
+    // Run emulation: here, until the next video field or the time budget is
+    // used up - or, with the emulation thread, not here at all.
+    emuLastRunCallUs.store(useconds_since_start());
+    if (emuThreadWanted && !emuThreaded) {
+        StartEmuThread();
+        log_printf("libretro: emulation runs on its own thread\n");
     }
+    if (!emuThreaded)
+        RunEmulation(false);
+
+    // The emulation thread is held at a step boundary while the picture is
+    // taken from its memory, and let go before the frame is handed over:
+    // presenting waits for the display and is the slow part.
+    EmuPause emuPause;
 
     // Render video
     if (gl_initialized) {
@@ -699,10 +866,12 @@ void retro_run(void)
                     px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2], px[2][0], px[2][1], px[2][2]);
             }
         }
+        emuPause.Release();
         video_cb(RETRO_HW_FRAME_BUFFER_VALID, FB_WIDTH, FB_HEIGHT, 0);
     } else {
         // Software fallback - black frame
         memset(framebuffer, 0, sizeof(framebuffer));
+        emuPause.Release();
         video_cb(framebuffer, FB_WIDTH, FB_HEIGHT, FB_WIDTH * 4);
     }
 

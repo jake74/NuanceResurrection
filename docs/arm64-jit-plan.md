@@ -355,10 +355,43 @@ Emitter bugs the test found, present on x86 too and fixed here:
   in a scheduler that recognises a waiting MPE reliably. Both are projects of
   their own, with timing between MPEs as the risk.
 
+### Tempest 3000 at full speed: the emulation thread (2026-11-15)
+
+Tempest 3000 at full speed is now the goal the work is measured against.
+"Full speed" here means the MPEs that are busy executing 54 million packets a
+second, which is what the hardware's 54 MHz clock gives them.
+
+- Measurements are now taken in a game, not at the title menu:
+  `NUANCE_AUTOPRESS=150,start+a` presses START and A every 150 frames, which
+  gets through the menus and into the first level unattended.
+- RetroArch calls `retro_run` once per display frame and then waits for the
+  display. Run from there, the emulation only had the time between two such
+  waits. It now runs on a thread of its own (`RunEmulation` and the
+  "Emulation thread" section in `src/libretro.cpp`); `retro_run` reads input,
+  takes the picture with the thread held at a step boundary, and hands over
+  the audio. On by default when the Arm64 emitter is in use;
+  `NUANCE_EMU_THREAD=0` or `=1` overrides. The thread stops running when the
+  frontend stops asking for frames, so pause still pauses.
+- Tempest 3000 in the first level, M4 Pro, packets per second:
+
+  | | MPE0 | MPE1 | MPE2 | MPE3 | `VidSync`/s |
+  |---|---|---|---|---|---|
+  | Hardware | 54 million | 54 million | 54 million | 54 million | |
+  | Before | 28-32 million | 30-34 million | 22-24 million | 7.5 million | 19-22 |
+  | With the emulation thread | 45-56 million | 48-61 million | 36-44 million | 11-12 million | 25-47 |
+
+  Merlin Racing's demo went from about 41 buffer swaps a second to 66.
+- What is left for Tempest 3000: MPE2 is at about three quarters of hardware
+  speed in the first level, and later levels are heavier. MPE3 is held to one
+  packet per step by the packet hack; whether it needs more is not known.
+- A side effect to be aware of: the emulation keeps wall-clock time whatever
+  the frontend does, so RetroArch's fast-forward and slow-motion no longer
+  change the game's speed.
+
 Testing aids added along the way, all environment variables:
 `NUANCE_A64_WATCHDOG=1` reports where the emulation is if frames stop for five
-seconds, `NUANCE_AUTOPRESS=<frames>` presses START periodically so an
-unattended run gets past prompts, `NUANCE_A64_DIFFTEST_TRACE=1` names each
+seconds, `NUANCE_AUTOPRESS=<frames>[,<buttons>]` presses START (or the named
+buttons) periodically so an unattended run gets past prompts, `NUANCE_A64_DIFFTEST_TRACE=1` names each
 block before the differential test runs it, and
 `NUANCE_A64_DIFFTEST_DUMP=<trial>` prints that trial's generated code as hex
 for a disassembler.
