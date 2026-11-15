@@ -41,6 +41,7 @@
 #include "NativeCodeCache.h"
 
 extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls; // video.cpp
+static uint64_t perfAudioFrames = 0;
 
 // GLWindow stubs for libretro (no windowing needed)
 #include "GLWindow.h"
@@ -494,6 +495,13 @@ void retro_run(void)
             (perf_packets[0] + perf_packets[1] + perf_packets[2] + perf_packets[3]) / secs,
             perfVidSyncCalls / secs, perfVidChangeBaseCalls / secs);
         perfVidSyncCalls = perfVidChangeBaseCalls = 0;
+        // Audio handed to the frontend against what continuous playback
+        // needs. Less than the nominal rate means the game did not refill its
+        // buffer in time and there are gaps in the sound.
+        {
+            log_printf("libretro: perf: audio %.0f frames/s delivered, %.0f needed for continuous sound\n", perfAudioFrames / secs, (double)nuonEnv.nuonAudioPlaybackRate);
+            perfAudioFrames = 0;
+        }
 #ifdef USE_A64_JIT
         if (nuonEnv.compilerOptions.bArm64NativeCode) {
             char stats[1024];
@@ -611,8 +619,18 @@ void retro_run(void)
                     (new_time >= last_time3 + audioIntervalUs) &&
                     ((nuonEnv.nuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT)) != (nuonEnv.oldNuonAudioChannelMode & (ENABLE_WRAP_INT | ENABLE_HALF_INT))) &&
                     ((((nuonEnv.mpe[0].intsrc & nuonEnv.mpe[0].inten1) | (nuonEnv.mpe[1].intsrc & nuonEnv.mpe[1].inten1) | (nuonEnv.mpe[2].intsrc & nuonEnv.mpe[2].inten1) | (nuonEnv.mpe[3].intsrc & nuonEnv.mpe[3].inten1)) & INT_AUDIO) == 0)) {
-                    if (nuonEnv.TryPushAudioPeriod())
-                        last_time3 = new_time;
+                    if (nuonEnv.TryPushAudioPeriod()) {
+                        // Keep to the schedule, not to when this check happened to run:
+                        // the check is only made every few thousand emulation steps and
+                        // not at all between retro_run calls, so restarting the interval
+                        // from "now" made every period a little late and delivered about
+                        // 8% less audio than playback consumes - audible as gaps. If the
+                        // game has fallen a whole period behind there is nothing to catch
+                        // up to, so start again from here.
+                        last_time3 += audioIntervalUs;
+                        if (new_time - last_time3 >= audioIntervalUs)
+                            last_time3 = new_time;
+                    }
                 }
             } else last_time3 = new_time;
         }
@@ -665,6 +683,7 @@ void retro_run(void)
     // (the ring holds little-endian samples; swapped only on big-endian hosts),
     // so what audio_batch_cb expects
     uint32 frames = nuonEnv.DrainAudioRing(audio_buffer, AUDIO_BUFFER_SIZE / 2);
+    perfAudioFrames += frames;
     if (frames)
         audio_batch_cb(audio_buffer, frames);
 }
