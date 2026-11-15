@@ -661,9 +661,25 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
       if(info & (kBranchMask | PACKETINFO_ECU))
       {
         bHasBranch = true;
+        // One time in three, the second delay slot of a delayed conditional
+        // branch gets a branch of its own, of the ",nop" kind: the pattern
+        // FetchSuperBlock compiles with a run-time check of ecuSkipCounter.
+        const bool bDelayedConditional = (info & kBranchMask) == PACKETINFO_BRANCH_CONDITIONAL;
         for(int slot = 0; slot < 2; slot++)
         {
-          const uint32 slotLength = PlacePacket(rng, mpe, mem, cursor, false, info);
+          uint32 slotLength = 0;
+          if(slot == 1 && bDelayedConditional && rng.Below(3) == 0)
+          {
+            for(int attempt = 0; attempt < 64; attempt++)
+            {
+              slotLength = PlacePacket(rng, mpe, mem, cursor, true, info);
+              if(slotLength && (info & PACKETINFO_BRANCH_NOP))
+                break;
+              slotLength = 0;
+            }
+          }
+          if(!slotLength)
+            slotLength = PlacePacket(rng, mpe, mem, cursor, false, info);
           cursor += slotLength;
           if(info & PACKETINFO_MEM)
             bHasMemory = true;
@@ -846,7 +862,12 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     }
     for(int i = 0; i < 48; i++)
     {
-      if(native.regs[i] != interpreted.regs[i])
+      // cc has eleven flags. A pop loads the whole stacked word into it, and a
+      // constant stored to cc afterwards replaces the word in the interpreter
+      // but only the flag bits in generated code (on x86 as well). Nothing
+      // reads the bits above the flags, so they are not compared.
+      const uint32 mask = (i == 32) ? 0x7FFU : 0xFFFFFFFFU;
+      if((native.regs[i] & mask) != (interpreted.regs[i] & mask))
       {
         char buf[128];
         snprintf(buf, sizeof(buf), " %s native %08X interp %08X (was %08X);", kRegNames[i], native.regs[i], interpreted.regs[i], initial.regs[i]);

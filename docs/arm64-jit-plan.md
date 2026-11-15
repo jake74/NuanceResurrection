@@ -400,6 +400,73 @@ One thing to know when testing from a shell on macOS: RetroArch started as a
 background process stops being given frames after a few seconds. Start it
 with `open -n -a RetroArch --env NUANCE_ARM64_JIT=1 --args ...` instead.
 
+### Play-test of later levels, and what it led to (2026-11-15)
+
+Jake played several levels with the emulation thread. Level one felt fast;
+later levels slowed. The log from that session (82 five-second intervals) shows
+why: in busy scenes MPE1 and MPE2 drop to 32-37 million packets a second
+(hardware: 54), MPE0 to about 48, and the game calls `VidSync` about 30 times a
+second where quiet scenes reach 50-70.
+
+A host profile of level one put about a third of the emulation thread's time
+in `FetchDecodeExecute` itself, at the two ends of one branch: "is there a
+native block for this address". Each MPE alternates between a native block and
+an interpreted packet nearly every turn, so that branch is mispredicted about
+as often as it is taken. The cure is fewer interpreted packets, which also
+lets blocks chain. New counters in the `NUANCE_PERF` log say why a compilable
+packet was interpreted, and how often overlays change. Three changes came out
+of them:
+
+- **Lower compile threshold in MPE local memory** (`a64IramThreshold`, 3
+  instead of 50). Tempest 3000 changes overlay about a thousand times a second
+  on each rendering MPE, and each change clears the interpreter cache and its
+  run counts. Code that runs fewer than 50 times per visit was therefore never
+  compiled, however often the overlay came back. Blocks are kept per overlay,
+  so each is still compiled only once. This doubles the amount of generated
+  code (about 3 MB on MPE1 after a minute), so the code buffer is now 24 MB
+  per MPE, and a flush invalidates only the part that was used.
+- **`mdmactl`, `odmactl` and their pointer registers can be read in compiled
+  code.** The game polls `mdmactl` around every DMA; the read has no side
+  effect and the emitter already matched the interpreter.
+- **A ",nop" branch in the second delay slot of a conditional branch is
+  compiled** ("bra lt, A / ... / bra le, B, nop", the game's three-way test).
+  The emitters' dormant `bCheckECUSkipCounter` path does the run-time check
+  that the first branch was not taken. The differential test now generates
+  this pattern (about 6,700 more natively compared trials per 200,000).
+
+Level one, scripted, mean of nine intervals, before and after: total packets
+163-169 million a second to 197-206; `VidSync` 32-34 a second to 42-43;
+interpreted packets on MPE1 from 4.3 to 2.7 million a second. Runs differ by
+several percent because the game is not deterministic. The differential test
+is clean over ten seeds.
+
+Tried and dropped in the same session:
+
+- Prefetching the next block's cache entry: no measurable change, which is
+  what showed the dispatcher cost to be misprediction and not cache misses.
+- Compiling packets that are marked compiled but have no block under the
+  current overlay (`NUANCE_A64_RECOMPILE_MARKED=1`, off by default). It works,
+  but the code concerned is MPE0's wait loop: compiled, it chains to the full
+  32 packets a turn and MPE0 runs at 140 million packets a second while the
+  MPEs doing the drawing get less. No gain in frame rate.
+- Giving MPE3 two or four turns per round: the game hangs before the first
+  level. The packet hack works by keeping MPE3 slow relative to the others,
+  so MPE3's 10-16 million packets a second cannot simply be raised.
+
+The differential test also met a harmless difference: a constant stored to
+`cc` replaces the whole word in the interpreter but only the eleven flag bits
+in generated code (x86 included), which shows after a `pop` has loaded a full
+word into `cc`. Nothing reads the upper bits; the test now ignores them.
+
+Still interpreted and worth doing next, largest first: a delayed branch in a
+delay slot (needs the delay slots that lie outside the block), branches in
+the first delay slot (needs an exit from the middle of a block), and
+indirect memory access in a delay slot.
+
+RetroArch closes its `--log-file` when a game is started from its menu with
+a core override in place. `NUANCE_LOG_FILE=<path>` makes the core append its
+own log lines to a file as well.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

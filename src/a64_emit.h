@@ -49,6 +49,14 @@ extern unsigned a64ChainPackets;
 // Per-MPE dispatch counts for the NUANCE_PERF log: native blocks entered,
 // packets interpreted, and how many of those were marked never to be compiled.
 extern unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4];
+// Why a compilable packet was interpreted: [mpe][0] in a delay slot or handed
+// back by a block, [1] newly decoded, [2] marked compiled but no block for
+// this overlay, [3] not yet run often enough to compile.
+extern unsigned long long a64PerfWhy[4][4];
+extern unsigned a64CompileSlotBranches; // compile a ",nop" branch in a conditional branch's second delay slot
+extern unsigned a64IramThreshold;  // runs before a packet in MPE local memory is compiled
+extern unsigned a64RecompileMarked; // compile a packet marked COMPILED that has no block
+
 
 // With a64PerfSampleInterpreted set (NUANCE_PERF does), the dispatcher reports
 // every packet it interprets and A64_TopInterpretedPackets lists the addresses

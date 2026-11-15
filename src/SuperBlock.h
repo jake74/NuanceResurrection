@@ -106,6 +106,7 @@ private:
   uint32 startAddress;
   uint32 exitAddress;
   uint32 nextDelayCounter;
+  uint32 a64GuardedPacketPc = 0; // packet whose branch is emitted with the ecuSkipCounter check
   bool bCanEmitNativeCode;
 #ifdef USE_A64_JIT
   uint32 a64EmitFailure; // A64_EMIT_*: set by EmitCodeBlock when the native block could not be emitted

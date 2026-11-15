@@ -1932,6 +1932,7 @@ bool MPE::FetchDecodeExecute()
 
         bool bInvalidateOverlayRegion; // and also get the new overlay mask
         overlayMask = overlayManager.FindOverlay(bInvalidateOverlayRegion);
+        a64OverlayLookups++;
 
         //Invalidate the interpreter cache because these entries are not mapped to unique address ranges
 
@@ -2007,7 +2008,19 @@ bool MPE::FetchDecodeExecute()
     {
       if (!only_find_icache_entry)
       {
+#ifdef USE_A64_JIT
+        // Getting here means there is no block for this packet under the
+        // current overlay, whatever the COMPILED mark says: the mark outlives
+        // an overlay change when the packet lies outside the rewritten part of
+        // local memory, and then it kept the packet interpreted for good.
+        // Local memory also gets a lower threshold (a64IramThreshold): each
+        // overlay change restarts the counts, so code that runs a few times
+        // per visit, a thousand visits a second, never reached the usual one.
+        const bool bLocalCode = pcexecLookupValue != pcexec;
+        if(!(pInstructionCacheEntry->packetInfo & ((a64RecompileMarked ? 0 : PACKETINFO_COMPILED) | PACKETINFO_NEVERCOMPILE)) && (pInstructionCacheEntry->frequencyCount >= (bLocalCode ? a64IramThreshold : COMPILE_THRESHOLD)))
+#else
         if(!(pInstructionCacheEntry->packetInfo & (PACKETINFO_COMPILED | PACKETINFO_NEVERCOMPILE)) && (pInstructionCacheEntry->frequencyCount >= COMPILE_THRESHOLD))
+#endif
         {
           if(nativeCodeCache.IsBeyondThreshold())
           {
@@ -2063,6 +2076,9 @@ bool MPE::FetchDecodeExecute()
       skip_to_execute_block = true;
     }
 
+#ifdef USE_A64_JIT
+    const bool a64FreshDecode = !skip_to_execute_block;
+#endif
     if(!skip_to_execute_block)
     {
       pInstructionCacheEntry->pcexec = pcexec;
@@ -2227,6 +2243,8 @@ bool MPE::FetchDecodeExecute()
         a64PerfInterpreted[mpeIndex & 3]++;
         if(pInstructionCacheEntry->packetInfo & PACKETINFO_NEVERCOMPILE)
           a64PerfNeverCompile[mpeIndex & 3]++;
+        else
+          a64PerfWhy[mpeIndex & 3][only_find_icache_entry ? 0 : a64FreshDecode ? 1 : (pInstructionCacheEntry->packetInfo & PACKETINFO_COMPILED) ? 2 : 3]++;
         // One in sixteen, so that looking does not slow down what is being looked at.
         if(a64PerfSampleInterpreted && ((a64PerfInterpreted[mpeIndex & 3] & 15) == 0))
           A64_NoteInterpretedPacket(mpeIndex, pcexec, pInstructionCacheEntry->packetInfo);

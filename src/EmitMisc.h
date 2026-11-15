@@ -27,7 +27,13 @@ struct EmitterVariables
   // because FetchSuperBlock bails native compilation when delay-slot packets
   // contain ECU ops, eliminating the case those guards would handle. See
   // comment block at the top of SuperBlock::EmitCodeBlock for a full explanation
+#ifdef USE_A64_JIT
+  // Set by SuperBlock::EmitCodeBlock for a branch that sits in the second
+  // delay slot of a conditional branch (see FetchSuperBlock).
+  bool bCheckECUSkipCounter = false;
+#else
   static constexpr bool bCheckECUSkipCounter = false;
+#endif
 };
 
 inline x86BaseReg GetScalarRegReadBaseReg(const EmitterVariables* const vars, const uint32 regIndex)

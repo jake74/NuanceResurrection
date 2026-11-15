@@ -383,6 +383,7 @@ public:
 
   uint32 numInterpreterCacheFlushes;
   uint32 numNativeCodeCacheFlushes;
+  uint32 a64OverlayLookups = 0; // FindOverlay calls, for the NUANCE_PERF report
   uint32 numNonCompilablePackets;
   //uint32 mpeStartAddress;
   //uint32 mpeEndAddress;

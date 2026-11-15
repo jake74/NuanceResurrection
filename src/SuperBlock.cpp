@@ -403,6 +403,9 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
           numLiveInstructions++;
           codeCache.emitVars.scalarRegOutDep = pInstruction->scalarOutputDependencies;
           codeCache.emitVars.miscRegOutDep = pInstruction->miscOutputDependencies;
+#ifdef USE_A64_JIT
+          codeCache.emitVars.bCheckECUSkipCounter = a64GuardedPacketPc && (pInstruction->packet->pcexec == a64GuardedPacketPc);
+#endif
 
           ((NativeEmitHandler)(emitHandlers[pInstruction->instruction.fields[0]]))(&codeCache.emitVars,pInstruction->instruction);
         }
@@ -961,6 +964,9 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
   constexpr bool bForceILBlock = false; // forced to false for now, see disabled enablement/comments below
 
   bContainsBranch = false;
+#ifdef USE_A64_JIT
+  a64GuardedPacketPc = 0;
+#endif
 
   nextDelayCounter = 0;
   numPackets = 0;
@@ -1070,7 +1076,28 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
             packetDelaySlot1.packetInfo |= SUPERBLOCKINFO_CHECK_ECUSKIPCOUNTER;
             packetDelaySlot2.packetInfo |= SUPERBLOCKINFO_CHECK_ECUSKIPCOUNTER;
 
-            if(((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & DELAY_SLOT_BLOCKERS))
+            uint32 slotBlockers = (packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & DELAY_SLOT_BLOCKERS;
+#ifdef USE_A64_JIT
+            // A conditional branch whose second delay slot holds a ",nop"
+            // branch - "bra lt, A / ... / bra le, B, nop" is how Tempest 3000
+            // writes its three-way tests. If the first branch is taken the
+            // second is not evaluated; otherwise it is an ordinary branch at
+            // the end of the block. The emitters have a run-time check of
+            // ecuSkipCounter for exactly this (bCheckECUSkipCounter), so the
+            // three packets can be one native block. The second branch must be
+            // the ",nop" kind: a delayed one would need its own delay slots,
+            // which lie outside the block.
+            if(a64CompileSlotBranches && bCanEmitNativeCode
+              && ((packet.packetInfo & (PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_ALWAYS)) == PACKETINFO_BRANCH_CONDITIONAL)
+              && !(packetDelaySlot1.packetInfo & DELAY_SLOT_BLOCKERS)
+              && ((packetDelaySlot2.packetInfo & DELAY_SLOT_BLOCKERS) == PACKETINFO_ECU)
+              && (packetDelaySlot2.packetInfo & PACKETINFO_BRANCH_NOP))
+            {
+              slotBlockers = 0;
+              a64GuardedPacketPc = packetDelaySlot2.pcexec;
+            }
+#endif
+            if(slotBlockers)
             {
               if(bFirstNonNOPReached)
               {
@@ -1088,10 +1115,25 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               // stays false and the 'else' branch below bails to the interpreter
               // (keeping the IL-downgrade wiring intact for potential future re-enablement)
               //bForceILBlock = true;
+#ifdef USE_A64_JIT
+              {
+                extern void libretro_log_info(const char* text);
+                static int shown = 0;
+                static const bool bShow = getenv("NUANCE_A64_SHOW_BLOCKERS") != nullptr;
+                if(bShow && shown < 400)
+                {
+                  shown++;
+                  char line[256];
+                  snprintf(line, sizeof(line), "blocker: MPE%u %08X slot1 %s%s%s%s slot2 %s%s%s%s", pMPE->mpeIndex, packet.pcexec,
+                    (packetDelaySlot1.packetInfo & PACKETINFO_ECU) ? "ecu " : "", (packetDelaySlot1.packetInfo & PACKETINFO_MEMORY_INDIRECT) ? "indirect " : "", (packetDelaySlot1.packetInfo & PACKETINFO_NEVERCOMPILE) ? "never " : "", (packetDelaySlot1.packetInfo & PACKETINFO_BRANCH_NOP) ? "(nop-branch) " : "",
+                    (packetDelaySlot2.packetInfo & PACKETINFO_ECU) ? "ecu " : "", (packetDelaySlot2.packetInfo & PACKETINFO_MEMORY_INDIRECT) ? "indirect " : "", (packetDelaySlot2.packetInfo & PACKETINFO_NEVERCOMPILE) ? "never " : "", (packetDelaySlot2.packetInfo & PACKETINFO_BRANCH_NOP) ? "(nop-branch) " : "");
+                  libretro_log_info(line);
+                }
+              }
+#endif
             }
  
-            if(!((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & DELAY_SLOT_BLOCKERS) 
-              || bForceILBlock)
+            if(!slotBlockers || bForceILBlock)
             {
               {
               AddPacketToList(packet,numPackets);

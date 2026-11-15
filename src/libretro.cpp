@@ -126,6 +126,15 @@ static void log_printf(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(line, sizeof(line), fmt, ap);
     va_end(ap);
+    // NUANCE_LOG_FILE=<path>: also append to a file of the core's own. RetroArch
+    // closes its --log-file when it reloads its configuration for a core override,
+    // which is what happens when a game is started from the menu.
+    static FILE* const ownLog = getenv("NUANCE_LOG_FILE") ? fopen(getenv("NUANCE_LOG_FILE"), "a") : nullptr;
+    if (ownLog)
+    {
+        fputs(line, ownLog);
+        fflush(ownLog);
+    }
     if (log_cb)
         log_cb(RETRO_LOG_INFO, "%s", line);
     else
@@ -464,6 +473,12 @@ bool retro_load_game(const struct retro_game_info *game)
     // code depends on it; otherwise stay with the interpreter.
     if (const char* const chain = getenv("NUANCE_A64_CHAIN"))
         a64ChainPackets = (unsigned)atoi(chain);
+    if (const char* const v = getenv("NUANCE_A64_IRAM_THRESHOLD"))
+        a64IramThreshold = (unsigned)atoi(v);
+    if (const char* const v = getenv("NUANCE_A64_SLOT_BRANCHES"))
+        a64CompileSlotBranches = (unsigned)atoi(v);
+    if (const char* const v = getenv("NUANCE_A64_RECOMPILE_MARKED"))
+        a64RecompileMarked = (unsigned)atoi(v);
     if (nuonEnv.compilerOptions.bArm64NativeCode) {
         char selfTest[256];
         const bool passed = A64_JitSelfTest(selfTest, sizeof(selfTest));
@@ -775,6 +790,16 @@ void retro_run(void)
                     a64PerfNativeBlocks[i] / secs,
                     a64PerfNativeBlocks[i] ? (double)(perf_packets[i] - a64PerfInterpreted[i]) / a64PerfNativeBlocks[i] : 0.0,
                     a64PerfInterpreted[i] / secs, a64PerfNeverCompile[i] / secs);
+                log_printf("libretro: perf: MPE%d compilable but interpreted, per second: %.0f in a delay slot, %.0f newly decoded, %.0f compiled for another overlay, %.0f below the threshold\n", i,
+                    a64PerfWhy[i][0] / secs, a64PerfWhy[i][1] / secs, a64PerfWhy[i][2] / secs, a64PerfWhy[i][3] / secs);
+                {
+                    static uint64 lastNative[4], lastInterp[4], lastFind[4];
+                    MPE& m = nuonEnv.mpe[i];
+                    log_printf("libretro: perf: MPE%d per second: %.0f overlay lookups, %.0f native cache flushes, %.0f interpreter cache flushes; %u overlays in use, %u KB of code\n", i,
+                        (m.a64OverlayLookups - lastFind[i]) / secs, (m.numNativeCodeCacheFlushes - lastNative[i]) / secs, (m.numInterpreterCacheFlushes - lastInterp[i]) / secs, m.overlayManager.GetOverlaysInUse(), m.nativeCodeCache.GetUsedCodeBufferSize() / 1024);
+                    lastFind[i] = m.a64OverlayLookups; lastNative[i] = m.numNativeCodeCacheFlushes; lastInterp[i] = m.numInterpreterCacheFlushes;
+                }
+                a64PerfWhy[i][0] = a64PerfWhy[i][1] = a64PerfWhy[i][2] = a64PerfWhy[i][3] = 0;
                 a64PerfNativeBlocks[i] = a64PerfInterpreted[i] = a64PerfNeverCompile[i] = 0;
             }
         }

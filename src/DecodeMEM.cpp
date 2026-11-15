@@ -1110,6 +1110,12 @@ uint32 MPE::GetControlRegisterInputDependencies(const uint32 address, bool &bExc
       //mdmactl
     case (0x610 >> 4):
       //mdmacptr
+#ifdef USE_A64_JIT
+      // Reading these has no side effect and the emitter reads them the way
+      // ReadControlRegister does. Tempest 3000 polls mdmactl around every
+      // DMA, and as never-compiled packets those reads cut its blocks short.
+      return 0;
+#endif
     case (0x7E0 >> 4):
       //comminfo
     case (0x7F0 >> 4):

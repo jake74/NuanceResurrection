@@ -21,7 +21,14 @@
 
 
 NativeCodeCache::NativeCodeCache()
+#ifdef USE_A64_JIT
+    // Tempest 3000 keeps a hundred and more overlays compiled on one MPE, about
+    // 3 MB after a few minutes of play, and a full buffer means flushing the
+    // lot and compiling it again. Untouched pages cost nothing.
+    : numBytes(24U*1024U*1024U)
+#else
     : numBytes(5U*1024U*1024U)
+#endif
 {
   Init();
 }
@@ -148,6 +155,7 @@ bool NativeCodeCache::ReleaseBuffer(NativeCodeCacheEntryPoint entryPoint, uint32
 void NativeCodeCache::Flush()
 {
   pageMap.Invalidate();
+  const size_t usedBytes = (size_t)(pEmitLoc - ptrNativeCodeBuffer); // nothing beyond this was ever code
   pEmitLoc = ptrNativeCodeBuffer;
   /*DWORD oldProtect;
   if (!VirtualProtect(pEmitLoc, numBytes, PAGE_READWRITE, &oldProtect)) //!! pages are f.e. 64k wide, so this does not work
@@ -156,7 +164,7 @@ void NativeCodeCache::Flush()
     MessageBox(NULL, "VirtualProtect failed", "VirtualProtect failed", MB_OK);
 #endif
   }*/
-  FlushInstructionCache(GetCurrentProcess(), pEmitLoc, numBytes); //!! should not be necessary, as each code block is flushed independently below in ReleaseBuffer(), but do it in case that ReleaseBuffer() is not the only thing called after emitting code
+  FlushInstructionCache(GetCurrentProcess(), pEmitLoc, usedBytes); //!! should not be necessary, as each code block is flushed independently below in ReleaseBuffer(), but do it in case that ReleaseBuffer() is not the only thing called after emitting code
 }
 
 // Everything from here on emits x86 machine code. The Arm64 build gets its own
