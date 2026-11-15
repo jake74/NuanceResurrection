@@ -744,6 +744,13 @@ static void StopEmuThread()
     emuThreaded = false;
 }
 
+// A frontend that quits without unloading the game (RetroArch's Quit menu
+// item calls exit()) would otherwise reach the destructor of a std::thread
+// that is still running, which aborts the process. This object is defined
+// after the emulation's own globals, so it is destroyed, and the thread
+// stopped, before they are.
+static struct EmuThreadAtExit { ~EmuThreadAtExit() { StopEmuThread(); } } emuThreadAtExit;
+
 static bool HoldEmuThread()
 {
     if (!emuThreaded)

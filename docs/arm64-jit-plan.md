@@ -576,6 +576,24 @@ changes. Not submitted: the macOS drawing fixes with the Arm64 code-buffer
 allocation, the disc read-ahead, and the two new options (MPE speed limit,
 `[MaxFrameRate]`).
 
+### On by default on Apple silicon Macs (2026-11-15)
+
+`[Arm64NativeCode]` now takes `Auto` as well as `Enabled` and `Disabled`,
+and the repository's `nuance.cfg` says `Auto`: on for Apple silicon Macs,
+off on other Arm64 hosts, where the backend is untested. The emulation
+thread follows the compiler, and the MPE speed limit applies everywhere.
+Checked by running Tempest 3000 from a system directory holding only the
+repository's `nuance.cfg` and BIOS files.
+
+Also fixed: RetroArch's Quit menu item exits without unloading the game,
+which destroyed a `std::thread` that was still running and aborted the
+process (six crash reports on Jake's Mac). The thread is now stopped at
+exit.
+
+For testing: RetroArch cannot load a core from an external volume without
+macOS asking for permission, so scripted runs use a copy of the built core
+in a temporary directory.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

@@ -1,6 +1,7 @@
 # Standalone apps: plan
 
-Status: proposed, 2026-11-15. Nothing here is started. It follows the Arm64 JIT
+Status: proposed, 2026-11-15; iOS dropped for now (see Decisions). Nothing
+here is started. It follows the Arm64 JIT
 work in [arm64-jit-plan.md](arm64-jit-plan.md).
 
 ## Goal
@@ -130,7 +131,12 @@ Made on 2026-11-15:
    has passed. Its stated focus is bringing Tempest 3000 back for fans of
    Jeff Minter. The repository is `jake74/nagori3k` (private for now), with
    this fork as the submodule `core/`.
-3. **iOS scope:** to be decided after the phase 0 measurement.
+3. **iOS scope:** dropped for now (decided later the same day). An App Store
+   or TestFlight build cannot use the dynamic compiler, and interpreted,
+   Tempest 3000 ran at about 5 frames a second on an M4 Pro. The apps are
+   Mac first, then Android. Phases 0 and 3 below are on hold, and the parts
+   of this plan that mention iOS describe what would be needed if that
+   changes.
 4. **Minimum OS versions:** macOS 14, iOS 17, Android 10 (API 29), Arm64 only.
 
 Still open:

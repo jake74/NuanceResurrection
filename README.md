@@ -91,13 +91,27 @@ Use a universal RetroArch build (Homebrew: `brew install --cask retroarch-metal`
 the plain `retroarch` cask is Intel-only. Then Load Core -> "VM Labs - NUON (Nuance)"
 and Load Content.
 
-On Arm64 the core interprets every packet, because the dynamic recompiler emits
-x86 code. Simple content runs at full speed, but demanding games do not (Tempest
-3000 manages about 5 fps on an M4 Pro). An Arm64 JIT backend is being built, see
-[docs/arm64-jit-plan.md](docs/arm64-jit-plan.md). It is compiled in but
-incomplete and off by default; `[Arm64NativeCode]` in `nuance.cfg` or
-`NUANCE_ARM64_JIT=1` in the environment switches it on, and `NUANCE_PERF=1` logs
-emulation speed and what the backend could not compile.
+On Apple silicon the core has its own Arm64 dynamic compiler (see
+[docs/arm64-jit-plan.md](docs/arm64-jit-plan.md)), and it is on by default:
+`[Arm64NativeCode]` in `nuance.cfg` is `Auto`. With it Tempest 3000 runs at the
+speed of the original hardware on an M4 Pro; interpreted, it manages about
+5 fps. The core checks at start-up that it is allowed to run generated code
+(RetroArch is) and falls back to the interpreter if not. With the compiler on,
+the emulation runs on its own thread, and each processor is held to the speed
+of the real one.
+
+Options that matter here:
+
+- `[Arm64NativeCode]`: `Enabled`, `Disabled` or `Auto`. `NUANCE_ARM64_JIT=0`
+  in the environment switches the compiler off for one run.
+- `[MaxFrameRate]`: a cap on how fast a game draws, for example `30`. Tempest
+  3000 does not wait for the display and plays faster when it draws faster,
+  so 30 is the setting to use for it. `Disabled` by default.
+- `NUANCE_PERF=1` logs emulation speed, stalls and what the compiler could
+  not compile; `NUANCE_LOG_FILE=<path>` writes the core's log to a file.
+
+On other Arm64 hosts the compiler is built in but untested and off unless
+asked for.
 
 ## Project structure
 

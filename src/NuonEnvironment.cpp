@@ -1017,7 +1017,11 @@ bool NuonEnvironment::LoadConfigFile(const std::string& fileName)
         else if(_strnicmp(&line[1],"Arm64NativeCode]",sizeof("Arm64NativeCode]")) == 0)
         {
           tokenType = ReadConfigLine(configFile,line);
-          compilerOptions.bArm64NativeCode = !_stricmp(line,"Enabled");
+          // "Auto", or anything else, leaves the platform's default in place
+          if(!_stricmp(line,"Enabled"))
+            compilerOptions.bArm64NativeCode = true;
+          else if(!_stricmp(line,"Disabled"))
+            compilerOptions.bArm64NativeCode = false;
         }
 #ifdef ENABLE_EMULATION_MESSAGEBOXES
         else if(_strnicmp(&line[1],"DumpCompiledBlocks]",sizeof("DumpCompiledBlocks]")) == 0)
