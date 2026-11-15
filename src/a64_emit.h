@@ -42,6 +42,14 @@ extern volatile unsigned a64DebugBlockPc;
 extern volatile unsigned a64DebugBlockMpe;
 extern volatile unsigned a64DebugBlockRunning; // 1 while inside the block
 
+// How many packets an MPE may run in one scheduler step by going straight from
+// one compiled block to the next (see MPE::FetchDecodeExecute). 0 turns that off.
+extern unsigned a64ChainPackets;
+
+// Per-MPE dispatch counts for the NUANCE_PERF log: native blocks entered,
+// packets interpreted, and how many of those were marked never to be compiled.
+extern unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4];
+
 // Differential test against the interpreter (a64_difftest.cpp).
 void A64_DiffTest(unsigned trials, unsigned seed);
 

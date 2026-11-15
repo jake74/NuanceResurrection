@@ -2142,10 +2142,76 @@ bool MPE::FetchDecodeExecute()
           a64DebugBlockPc = pcexec;
           a64DebugBlockMpe = mpeIndex;
           a64DebugBlockRunning = 1;
+          a64PerfNativeBlocks[mpeIndex & 3]++;
 #endif
           nativeCodeCacheEntryPoint();
 #ifdef USE_A64_JIT
           a64DebugBlockRunning = 0;
+
+          // Chaining: when the block that follows is already compiled, run it
+          // from here instead of going back out through the scheduler and in
+          // again. Bounded by a64ChainPackets packets per call (0 = off), so
+          // this MPE still yields to the others after a short burst - a block
+          // on its own may already be longer than that. Everything the top of
+          // this function would act on before running a block stops the chain:
+          // an interrupt that would be taken, a halt, a pending cache
+          // invalidation, a breakpoint. MPE3 is left alone while the packet
+          // hack is on, since yielding after every packet is the point of it.
+          if(a64ChainPackets && !(mpeIndex == 3 && nuonEnv.compilerOptions.bMPE3PacketHack))
+          {
+            uint32 packetsRun = pNativeCodeCacheEntry->numPackets;
+            while(packetsRun < a64ChainPackets)
+            {
+              if(ecuSkipCounter)
+              {
+                // A taken branch: native blocks leave exactly one step to resolve it.
+                if(ecuSkipCounter != 1)
+                  break;
+                ecuSkipCounter = 0;
+                pcexec = pcfetchnext;
+              }
+
+              if(!(mpectl & MPECTRL_MPEGO) || (excephalten & excepsrc) || bInvalidateInstructionCaches || interpretNextPacket)
+                break;
+              if(intsrc && ((intctl & (1U << 5)) == 0))
+              {
+                if(intsrc & (1U << inten2sel))
+                {
+                  if((intctl & (1U << 7)) == 0)
+                    break;
+                }
+                else if(((intctl & ((1U << 3) | (1U << 1))) == 0) && (intsrc & inten1))
+                  break;
+              }
+
+              // (pcexec itself is only touched once the next block is known to
+              // run, so that stopping here leaves exactly the state the
+              // scheduler would have found without chaining.)
+              const uint32 nextPc = pcexec & ~0x01U;
+              if(nextPc == breakpointAddress)
+                break;
+              uint32 lookup = nextPc;
+              if((nextPc < (MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex])) && (nextPc >= MPE_IRAM_BASE))
+              {
+                if((nextPc <= invalidateRegionEnd) && (nextPc >= invalidateRegionStart))
+                  break;
+                lookup |= overlayMask;
+              }
+
+              const NativeCodeCacheEntry * const pNext = nativeCodeCache.pageMap.FindEntry(lookup);
+              if(!pNext || (pNext->virtualAddress != lookup) || (pNext->compileType != SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_NATIVE_CODE_BLOCK))
+                break;
+
+              pcexec = nextPc;
+              cycleCounter += pNext->numPackets;
+              packetsRun += pNext->numPackets;
+              a64DebugBlockPc = pcexec;
+              a64DebugBlockRunning = 1;
+              a64PerfNativeBlocks[mpeIndex & 3]++;
+              pNext->entryPoint();
+              a64DebugBlockRunning = 0;
+            }
+          }
 #endif
           //blockExecuteCount--;
         }
@@ -2157,6 +2223,11 @@ bool MPE::FetchDecodeExecute()
       if(pcexec < ROM_BIOS_BASE)
       {
         cycleCounter++;
+#ifdef USE_A64_JIT
+        a64PerfInterpreted[mpeIndex & 3]++;
+        if(pInstructionCacheEntry->packetInfo & PACKETINFO_NEVERCOMPILE)
+          a64PerfNeverCompile[mpeIndex & 3]++;
+#endif
 
         //prevPcexec = pcexec;
         pcroute = pInstructionCacheEntry->pcroute;

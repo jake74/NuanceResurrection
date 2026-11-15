@@ -9,9 +9,10 @@
 // disagree by design, which shows up on x86 too and is for a person to judge.
 //
 // Covered: ALU, MUL and RCU instructions, memory instructions on main-bus RAM
-// (loads, stores, pixel and bilinear addressing, push and pop), and branches
-// with their delay slots. Not covered: control-register access, which has
-// side effects on the rest of the machine.
+// (loads, stores, pixel and bilinear addressing, push and pop), branches with
+// their delay slots, and loads and stores of the control registers that are
+// plain state. Not covered: the other control registers, which have side
+// effects on the rest of the machine.
 //
 // Runs that cannot be compiled natively are counted, with the reason, so the
 // output also says what the backend lacks.
@@ -56,10 +57,11 @@ constexpr uint32 kMaxPacketsPerRun = 4;
 constexpr uint32 kTraceBytes = 256;           // saved around each traced pointer
 constexpr uint32 kTraceBefore = 64;
 
-// Packets left out: control-register access, and anything the decoders mark
-// as never compilable.
+// Packets left out: anything the decoders mark as never compilable. Control
+// register access is let through only for registers that are plain state
+// (see IsSafeControlRegisterAccess).
 constexpr uint32 kRejectMask =
-  PACKETINFO_NEVERCOMPILE | PACKETINFO_EXCEPTION | PACKETINFO_MEMORY_IO | PACKETINFO_BREAKPOINT;
+  PACKETINFO_NEVERCOMPILE | PACKETINFO_EXCEPTION | PACKETINFO_BREAKPOINT;
 
 constexpr uint32 kBranchMask = PACKETINFO_BRANCH_ALWAYS | PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_NOP;
 
@@ -395,6 +397,64 @@ bool IsUndefinedBilinearAccess(MPE &mpe, const InstructionCacheEntry &entry, con
   return (address & (size - 1)) != 0;
 }
 
+// Control registers that are nothing but state the test already sets up and
+// compares: the index, counter and shift registers of the register file, and
+// the texture and palette base addresses. The rest start DMA, talk to the
+// other processors, or change how the machine runs.
+bool IsSafeControlRegister(const uint32 address)
+{
+  switch((address & 0x1FF0) >> 4)
+  {
+    case 0x04: // cc
+    case 0x08: case 0x09: case 0x0A: // rz rzi1 rzi2
+    case 0x1E: case 0x1F: // rc0 rc1
+    case 0x20: case 0x21: case 0x22: case 0x23: case 0x24: // rx ry xyrange xybase xyctl
+    case 0x25: case 0x26: case 0x27: case 0x28: case 0x29: // ru rv uvrange uvbase uvctl
+    case 0x2B: case 0x2C: case 0x2D: // clutbase svshift acshift
+      return (address & 0xFFFFE000U) == MPE_CTRL_BASE;
+    default:
+      return false;
+  }
+}
+
+// Whether every control-register access in the packet is to such a register.
+bool IsSafeControlRegisterAccess(const InstructionCacheEntry &entry)
+{
+  if(!(entry.packetInfo & PACKETINFO_MEMORY_IO))
+    return true;
+  bool bFound = false;
+  for(uint32 i = 0; i < entry.nuanceCount; i++)
+  {
+    const size_t * const fields = &entry.nuances[FIXED_FIELD(i,0)];
+    switch(entry.handlers[i])
+    {
+      case Handler_LoadScalarControlRegisterAbsolute:
+        if(!IsSafeControlRegister((uint32)fields[FIELD_MEM_FROM])) return false;
+        bFound = true;
+        break;
+      case Handler_StoreScalarControlRegisterImmediate:
+        // A constant written to cc with either coprocessor flag set: constant
+        // propagation deliberately drops those two bits and the interpreter
+        // keeps them. Not something a program does.
+        if(((((uint32)fields[FIELD_MEM_TO]) & 0x1FF0) >> 4) == 0x04 && (fields[FIELD_MEM_FROM] & (CC_COPROCESSOR0 | CC_COPROCESSOR1)))
+          return false;
+        // fall through
+      case Handler_StoreScalarControlRegisterAbsolute:
+        if(!IsSafeControlRegister((uint32)fields[FIELD_MEM_TO])) return false;
+        bFound = true;
+        break;
+      case Handler_LoadVectorControlRegisterAbsolute:
+      case Handler_StoreVectorControlRegisterAbsolute:
+        return false;
+      default:
+        break;
+    }
+  }
+  // Flagged as control-register access but by none of the handlers above:
+  // something this function does not know about, so leave it out.
+  return bFound;
+}
+
 bool DecodeAt(MPE &mpe, uint8 * const mem, const uint32 address, InstructionCacheEntry &entry, const uint32 options)
 {
   entry.pcexec = address;
@@ -452,7 +512,8 @@ uint32 PlacePacket(Rng &rng, MPE &mpe, uint8 * const mem, const uint32 cursor, c
     // is not a packet the hardware accepts, and the decoder keeps the flags of
     // both but the operation of only one. Such packets decode to fewer
     // operations than they have instructions, as do ones with a no-op in them.
-    bool bAccept = !(entry.packetInfo & kRejectMask) && entry.pcroute == cursor + length && entry.nuanceCount == numInstructions;
+    bool bAccept = !(entry.packetInfo & kRejectMask) && entry.pcroute == cursor + length && entry.nuanceCount == numInstructions
+      && IsSafeControlRegisterAccess(entry);
     // And no two instructions writing the same register or flag: which of the
     // two results survives is not defined.
     for(uint32 i = 0; i < entry.nuanceCount && bAccept; i++)
@@ -556,6 +617,12 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     return;
   }
 
+  // Each trial compares one block against the packets it covers. Chaining
+  // would let the native side run on into whatever block a taken branch leads
+  // to - the run itself, when the branch goes back to its start.
+  const unsigned savedChainPackets = a64ChainPackets;
+  a64ChainPackets = 0;
+
   Rng rng = { 0x9E3779B97F4A7C15ULL ^ ((uint64)seed << 1) ^ 1 };
   for(uint32 i = 0; i < kDataBytes; i++)
     data[i] = (uint8)rng.Next();
@@ -644,6 +711,13 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
           if(IsUndefinedBilinearAccess(mpe, entry, i))
             bUndefinedInput = true;
           const Nuance &nuance = (Nuance &)(entry.nuances[FIXED_FIELD(i,0)]);
+          // A register written to cc with a coprocessor flag set: as for the
+          // constant form (IsSafeControlRegisterAccess), constant propagation
+          // drops those bits when it knows the register's value.
+          if(entry.handlers[i] == Handler_StoreScalarControlRegisterAbsolute &&
+             ((((uint32)nuance.fields[FIELD_MEM_TO]) & 0x1FF0) >> 4) == 0x04 &&
+             (mpe.reg_union[nuance.fields[FIELD_MEM_FROM]] & (CC_COPROCESSOR0 | CC_COPROCESSOR1)))
+            bUndefinedInput = true;
           uint32 count = 0;
           if(entry.handlers[i] == Handler_MULScalarShiftScalar || entry.handlers[i] == Handler_MULImmediateShiftScalar)
             count = mpe.reg_union[nuance.fields[FIELD_MUL_INFO]];
@@ -722,7 +796,10 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
 
     // A block may end before the run does (the fetcher stops where it must);
     // the dispatcher interprets the rest, exactly as it would in a game.
-    bool bBranched = (mpe.ecuSkipCounter == 0 && mpe.pcexec != blockEnd);
+    // (A block can also stop early and hand one packet back to the
+    // interpreter - an indirect store that turns out to need it does. That
+    // is not a branch; the loop below carries on from there.)
+    bool bBranched = (mpe.ecuSkipCounter == 0 && mpe.pcexec != blockEnd && !mpe.interpretNextPacket);
     for(int step = 0; step < 16 && !bBranched; step++)
     {
       if(mpe.ecuSkipCounter == 0 && (mpe.pcexec < kCodeBase || mpe.pcexec >= endAddress))
@@ -872,6 +949,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
   // The machine is not put back as it was: the test is for a process that
   // exits afterwards (tools/a64_difftest_host.c), not for a game session.
   nuonEnv.compilerOptions.bArm64NativeCode = true;
+  a64ChainPackets = savedChainPackets;
   mpe.nativeCodeCache.Flush();
   mpe.instructionCache->Invalidate();
 }

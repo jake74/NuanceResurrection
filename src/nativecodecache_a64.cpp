@@ -1798,6 +1798,8 @@ void NativeCodeCache::X86Emit_FEMMS() { A64_Unsupported("FEMMS"); }
 volatile unsigned a64DebugBlockPc = 0;
 volatile unsigned a64DebugBlockMpe = 0;
 volatile unsigned a64DebugBlockRunning = 0;
+unsigned a64ChainPackets = 32;
+unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4];
 
 // --- Statistics ---
 

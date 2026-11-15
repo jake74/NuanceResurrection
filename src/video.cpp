@@ -1479,10 +1479,13 @@ void VidSetup(MPE &mpe)
 // the game's own frame rate that the emulator can see.
 unsigned perfVidSyncCalls = 0;
 unsigned perfVidChangeBaseCalls = 0;
+unsigned perfVidSyncFields = 0; // fields the game asked to wait for, summed
 
 void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] fields (= mpe.regs[0] * 1/60 or 1/50 second), if 0 or -1 just return internal field counter, -2 is internal only
 {
   perfVidSyncCalls++;
+  if((int)mpe.regs[0] > 0)
+    perfVidSyncFields += mpe.regs[0];
   uint32 fieldCounter = SwapBytes(*((uint32*)&nuonEnv.systemBusDRAM[VIDEO_FIELD_COUNTER_ADDRESS & SYSTEM_BUS_VALID_MEMORY_MASK]));
 
   if ((int)mpe.regs[0] > 0)

@@ -282,6 +282,48 @@ Emitter bugs the test found, present on x86 too and fixed here:
   operands that are not a multiple of four, for which the decoder's
   dependency information does not match what the handlers touch.
 
+### Milestone 5 so far, and first speed work (2026-11-15)
+
+- Tempest 3000 has been played with a controller on the JIT and plays well.
+  Other games are still to be tried.
+- Sound was choppy. That was not the JIT: the libretro core delivered about
+  29,500 audio frames a second where playback consumes 32,000, on the
+  interpreter as well, because each period was scheduled from when the
+  previous one happened to be pushed. It now keeps to the schedule and
+  delivers what is needed (`NUANCE_PERF=1` logs both numbers).
+- A profile showed the dispatcher costing as much as the generated code, and
+  about one dispatch in three going to the interpreter. Three changes:
+  - **Chaining.** When the block that follows is already compiled, the
+    dispatcher runs it directly, up to 32 packets per scheduler step
+    (`NUANCE_A64_CHAIN=<packets>`, 0 to turn it off). MPE3 is left alone
+    while the packet hack is on.
+  - **Texture-base stores compile.** Writes to `xybase`, `uvbase` and
+    `clutbase` fell through to "never compile" in the decoder's table,
+    although the emitter has always handled them; Tempest 3000 sets `uvbase`
+    inside its drawing loops.
+  - **Plain control-register access in delay slots.** A branch whose delay
+    slots load or store plain machine state (`st_s #0, ru` and the like) is
+    no longer kept out of native blocks. Registers with side effects are
+    still excluded, by the decoder.
+
+  The last two are in code shared with the x86 builds.
+- Tempest 3000, same scene as the table above, auto-pressing START:
+
+  | | Packets per second | `VidSync` calls per second |
+  |---|---|---|
+  | Interpreter | 32-33 million | 3.1 |
+  | JIT before these changes | 78-80 million | 9.5 |
+  | JIT now | 102-105 million | 13.2-13.6 |
+
+- The differential test now also covers loads and stores of the control
+  registers that are plain state (207 of 216 handlers per 200,000 trials), and runs with
+  chaining off so each trial is exactly one block. Ten seeds, no mismatch.
+- What is still interpreted, by frequency in Tempest 3000: delayed branches
+  whose delay slots hold another branch (`cmp`/`bra` chains) or an indirect
+  load, the two packets after each of those, and DMA and comm-bus register
+  access. The first of these is the next candidate, and needs care: the
+  rules for a branch inside a delay slot are subtle.
+
 Testing aids added along the way, all environment variables:
 `NUANCE_A64_WATCHDOG=1` reports where the emulation is if frames stop for five
 seconds, `NUANCE_AUTOPRESS=<frames>` presses START periodically so an

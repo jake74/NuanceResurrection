@@ -1222,6 +1222,20 @@ uint32 MPE::GetControlRegisterOutputDependencies(const uint32 address, bool &bEx
     case (0x290 >> 4):
       //uvctl
       return DEPENDENCY_MASK_UVCTL;
+    case (0x230 >> 4):
+      //xybase
+    case (0x280 >> 4):
+      //uvbase
+    case (0x2B0 >> 4):
+      //clutbase
+      // Plain stores of a masked value, which EmitControlRegisterStore has
+      // always known how to emit. They are not part of the register file, so
+      // there is no dependency to declare; without a case here they fell to
+      // the default below and every packet setting a texture base - which
+      // Tempest 3000 does inside its drawing loops - was left to the
+      // interpreter. (linpixctl stays there: the interpreter's write does
+      // more than the emitter's.)
+      return 0;
     case (0x2C0 >> 4):
       //svshift
       return DEPENDENCY_MASK_SVSHIFT;  

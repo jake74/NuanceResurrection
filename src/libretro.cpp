@@ -40,7 +40,7 @@
 #include "archive.h"
 #include "NativeCodeCache.h"
 
-extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls; // video.cpp
+extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls, perfVidSyncFields; // video.cpp
 static uint64_t perfAudioFrames = 0;
 
 // GLWindow stubs for libretro (no windowing needed)
@@ -421,6 +421,8 @@ bool retro_load_game(const struct retro_game_info *game)
     // The Arm64 emitter is opt-in. When asked for, prove on this machine that
     // generated code can be written, made executable and run before any game
     // code depends on it; otherwise stay with the interpreter.
+    if (const char* const chain = getenv("NUANCE_A64_CHAIN"))
+        a64ChainPackets = (unsigned)atoi(chain);
     if (nuonEnv.compilerOptions.bArm64NativeCode) {
         char selfTest[256];
         const bool passed = A64_JitSelfTest(selfTest, sizeof(selfTest));
@@ -490,11 +492,15 @@ void retro_run(void)
     if (perf_enabled && ++perf_frames == 300) {
         const uint64 now = useconds_since_start();
         const double secs = (double)(now - perf_last_time) / 1e6;
-        log_printf("libretro: perf: packets/s MPE0 %.0f MPE1 %.0f MPE2 %.0f MPE3 %.0f total %.0f; game VidSync %.1f/s VidChangeBase %.1f/s\n",
+        // VidSync: how often the game asks for the next frame, and how many
+        // 60 Hz fields it asks to wait each time. 60 divided by the second is
+        // the frame rate the game is aiming for; the first falls short of
+        // that when the emulation cannot keep up.
+        log_printf("libretro: perf: packets/s MPE0 %.0f MPE1 %.0f MPE2 %.0f MPE3 %.0f total %.0f; game VidSync %.1f/s waiting %.1f fields each, VidChangeBase %.1f/s\n",
             perf_packets[0] / secs, perf_packets[1] / secs, perf_packets[2] / secs, perf_packets[3] / secs,
             (perf_packets[0] + perf_packets[1] + perf_packets[2] + perf_packets[3]) / secs,
-            perfVidSyncCalls / secs, perfVidChangeBaseCalls / secs);
-        perfVidSyncCalls = perfVidChangeBaseCalls = 0;
+            perfVidSyncCalls / secs, perfVidSyncCalls ? (double)perfVidSyncFields / perfVidSyncCalls : 0.0, perfVidChangeBaseCalls / secs);
+        perfVidSyncCalls = perfVidChangeBaseCalls = perfVidSyncFields = 0;
         // Audio handed to the frontend against what continuous playback
         // needs. Less than the nominal rate means the game did not refill its
         // buffer in time and there are gaps in the sound.
@@ -507,6 +513,13 @@ void retro_run(void)
             char stats[1024];
             A64_FormatStats(stats, sizeof(stats));
             log_printf("libretro: perf: Arm64 JIT %s\n", stats);
+            for (int i = 0; i < 4; i++) {
+                log_printf("libretro: perf: MPE%d per second: %.0f native blocks (%.1f packets each), %.0f packets interpreted, %.0f of them never compilable\n", i,
+                    a64PerfNativeBlocks[i] / secs,
+                    a64PerfNativeBlocks[i] ? (double)(perf_packets[i] - a64PerfInterpreted[i]) / a64PerfNativeBlocks[i] : 0.0,
+                    a64PerfInterpreted[i] / secs, a64PerfNeverCompile[i] / secs);
+                a64PerfNativeBlocks[i] = a64PerfInterpreted[i] = a64PerfNeverCompile[i] = 0;
+            }
         }
 #endif
         perf_packets[0] = perf_packets[1] = perf_packets[2] = perf_packets[3] = 0;

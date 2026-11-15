@@ -939,6 +939,17 @@ void SuperBlock::UpdateDependencyInfo()
   }
 }
 
+// What keeps a delayed branch out of a native block when it turns up in one of
+// the branch's two delay-slot packets: another branch, memory access through a
+// register (which may turn out to be a control register), or anything marked
+// never to be compiled. Control-register access by name used to be on this list
+// as well. The registers with side effects are already marked never-compile by
+// the decoder; what is left are plain loads and stores of machine state - the
+// index and counter registers, the texture bases - which behave in a delay slot
+// as they do anywhere else, and code like "bra le, ... / st_s #0, ru" in Tempest
+// 3000's drawing loops was being interpreted on their account.
+#define DELAY_SLOT_BLOCKERS (PACKETINFO_MEMORY_INDIRECT|PACKETINFO_ECU|PACKETINFO_NEVERCOMPILE)
+
 int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
 {
   uint32 decodeOptions = (DECOMPRESS_OPTIONS_SCHEDULE_ECU_LAST | DECOMPRESS_OPTIONS_SCHEDULE_MEM_FIRST);
@@ -1059,7 +1070,7 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
             packetDelaySlot1.packetInfo |= SUPERBLOCKINFO_CHECK_ECUSKIPCOUNTER;
             packetDelaySlot2.packetInfo |= SUPERBLOCKINFO_CHECK_ECUSKIPCOUNTER;
 
-            if(((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & (PACKETINFO_MEMORY_IO|PACKETINFO_MEMORY_INDIRECT|PACKETINFO_ECU|PACKETINFO_NEVERCOMPILE)))
+            if(((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & DELAY_SLOT_BLOCKERS))
             {
               if(bFirstNonNOPReached)
               {
@@ -1079,7 +1090,7 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               //bForceILBlock = true;
             }
  
-            if(!((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & (PACKETINFO_MEMORY_IO|PACKETINFO_MEMORY_INDIRECT|PACKETINFO_ECU|PACKETINFO_NEVERCOMPILE)) 
+            if(!((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & DELAY_SLOT_BLOCKERS) 
               || bForceILBlock)
             {
               {
