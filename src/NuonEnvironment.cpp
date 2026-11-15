@@ -588,7 +588,7 @@ void NuonEnvironment::Init()
   if(const char * const maxFps = getenv("NUANCE_MAX_FPS"))
   {
     const int fps = atoi(maxFps);
-    minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
+    maxGameFps = (fps > 0 && fps < 60) ? (uint32)fps : 0;
   }
 
   if (debugLogFile)
@@ -861,8 +861,8 @@ bool NuonEnvironment::SaveConfigFile(const char* const fileName)
   fprintf_s(configFile, "%s\n\n", compilerOptions.bConstantPropagation ? "Enabled" : "Disabled");
 
   fprintf_s(configFile, "[MaxFrameRate]\n");
-  if(minFieldsPerFrame)
-    fprintf_s(configFile, "%u\n\n", 60 / minFieldsPerFrame);
+  if(maxGameFps)
+    fprintf_s(configFile, "%u\n\n", maxGameFps);
   else
     fprintf_s(configFile, "Disabled\n\n");
 
@@ -1044,7 +1044,7 @@ bool NuonEnvironment::LoadConfigFile(const std::string& fileName)
         {
           tokenType = ReadConfigLine(configFile,line);
           const int fps = atoi(line); // "Disabled" reads as 0
-          minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
+          maxGameFps = (fps > 0 && fps < 60) ? (uint32)fps : 0;
         }
         else if(_strnicmp(&line[1],"MPE3PacketHack]",sizeof("MPE3PacketHack]")) == 0)
         {

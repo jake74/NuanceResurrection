@@ -1502,20 +1502,36 @@ void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] field
     fieldCounter += (int)mpe.regs[0];             // fast forward the passed vsyncs to be able to finish up this call here
     nuonEnv.MPE3wait_fieldCounter = fieldCounter; // but actually stall MPE3 emu in the main cycle loop
   }
-  else if(nuonEnv.minFieldsPerFrame && (mpe.mpeIndex == 3) && ((int)mpe.regs[0] != -2))
+  else if(nuonEnv.maxGameFps && (mpe.mpeIndex == 3) && ((int)mpe.regs[0] != -2))
   {
     // [MaxFrameRate]: a game that only asks for the field counter once per
     // frame and never waits (Tempest 3000) draws as fast as the MPEs allow,
-    // and plays faster when it draws faster. Make each frame last at least
-    // minFieldsPerFrame fields, the same way a requested wait is honoured.
-    static uint32 lastFrameField = 0;
-    const uint32 earliest = lastFrameField + nuonEnv.minFieldsPerFrame;
-    if(lastFrameField && (fieldCounter >= lastFrameField) && (fieldCounter < earliest))
+    // and plays faster when it draws faster. Each frame is given a due time
+    // 60/maxGameFps fields after the last one's, and the game is held until
+    // the field that reaches it, the same way a requested wait is honoured.
+    // The due time keeps its fraction, so 24 a second comes out as frames of
+    // three and two fields in turn. A frame that is already late is not held,
+    // and the schedule starts again from it.
+    static double frameDue = 0.0;
+    static uint32 scheduleFps = 0;
+    const double interval = 60.0 / (double)nuonEnv.maxGameFps;
+    if(scheduleFps != nuonEnv.maxGameFps || frameDue == 0.0 || (double)fieldCounter > frameDue + interval)
     {
-      fieldCounter = earliest;
-      nuonEnv.MPE3wait_fieldCounter = fieldCounter;
+      scheduleFps = nuonEnv.maxGameFps;
+      frameDue = (double)fieldCounter; // first frame, or one that took too long: nothing to wait for
     }
-    lastFrameField = fieldCounter;
+    else
+    {
+      frameDue += interval;
+      const uint32 dueField = (uint32)(frameDue + 0.999);
+      if(fieldCounter < dueField)
+      {
+        fieldCounter = dueField;
+        nuonEnv.MPE3wait_fieldCounter = fieldCounter;
+      }
+      else if(fieldCounter > dueField)
+        frameDue = (double)fieldCounter; // late: no credit carried
+    }
   }
 
   mpe.regs[0] = fieldCounter;

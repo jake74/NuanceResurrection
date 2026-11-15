@@ -679,7 +679,7 @@ static void ApplyCoreOptions()
     var = { "nuance_max_fps", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && strcmp(var.value, "config file") != 0) {
         const int fps = atoi(var.value); // "unlimited" reads as 0
-        nuonEnv.minFieldsPerFrame = (fps > 0 && fps < 60) ? (uint32)((60 + fps / 2) / fps) : 0;
+        nuonEnv.maxGameFps = (fps > 0 && fps < 60) ? (uint32)fps : 0;
     }
 }
 
@@ -698,7 +698,7 @@ void retro_set_environment(retro_environment_t cb)
     // "config file" leaves the value from nuance.cfg (or the built-in default).
     static const struct retro_variable variables[] = {
         { "nuance_scanlines", "Scanlines (CRT shader); config file|enabled|disabled" },
-        { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|20|15" },
+        { "nuance_max_fps", "Maximum game frame rate; config file|unlimited|30|24|20|15" },
         { "nuance_t3k_high_scores", "Tempest 3000 high scores; keep|do not keep|erase" },
         { "nuance_controller", "Controller; d-pad only|analog stick|NUON analog stick (not for Tempest 3000)" },
         { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
