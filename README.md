@@ -9,6 +9,18 @@ Linux/libretro port by WizzardSK in 2026.
 
 NUON is/was a trademark of Genesis Microchip, Inc.
 
+## About this fork
+
+This is a fork of [andkrau/NuanceResurrection](https://github.com/andkrau/NuanceResurrection),
+on the branch `macos-arm64`. It adds the macOS port, an Arm64 dynamic compiler
+for Apple silicon and Android, and the changes that make Tempest 3000 run at
+the speed of the original hardware.
+
+**Made with AI.** The additions in this fork were written with an AI coding
+assistant, directed and play-tested by Jake Smith. That applies to this
+fork's changes only: Nuance itself, and the work of the NuanceResurrection
+contributors it is built on, are theirs and were not.
+
 ## Disclaimer
 
 This emulator was developed in a clean room setting, using only the Nuon SDK
