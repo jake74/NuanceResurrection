@@ -102,7 +102,7 @@ Status of these, 2026-11-15 (fork commit after `90dcce4`):
   stick (or a mouse) and feeds it to the game as a quadrature spinner, which
   Tempest 3000 reads; the d-pad keeps working beside it.
   `nuance_spinner_sensitivity` (10%-400%), `nuance_spinner_inertia`
-  (0%-100%) and `nuance_spinner_invert` tune it; the apps should show the
+  (0%-200%, default 100%; recalibrated 2026-11-16 at Jake's request: the scale to 100% is unchanged, above it both spin-up and coasting taper so the wheel always stops) and `nuance_spinner_invert` tune it; the apps should show the
   first two as sliders.
 
   How the game treats the spinner was measured, not guessed, with three

@@ -401,7 +401,7 @@ extern unsigned perfVidSyncTotal;       // video.cpp: game frames drawn
 enum { CONTROL_DPAD, CONTROL_STICK, CONTROL_NUON_ANALOG };
 static int controlMode = CONTROL_DPAD;
 static float spinnerSensitivity = 1.0f; // 1 = full stick is the fastest the game moves the claw
-static float spinnerInertia = 0.7f;     // 0 = stops with the stick, 1 = coasts for most of a second
+static float spinnerInertia = 1.0f;     // 0 = stops with the stick, 1 = coasts for over a second, 2 = for nearly four
 static float spinnerDirection = 1.0f;
 static float flywheelSpeed = 0.0f;      // counts per game frame
 static double mouseOwed = 0.0;          // mouse movement since the last game frame, in counts
@@ -438,20 +438,25 @@ static void ApplyAnalogControls()
     constexpr float kFullStickCountsPerGameFrame = 14.0f; // just past where the game's response tops out
     constexpr double kMaxCountsPerRead = 100.0;
     const float target = drive * kFullStickCountsPerGameFrame * spinnerSensitivity * spinnerDirection;
+    // The weight runs from 0 to 2 (0% to 200%), default 1. Past 1 both scales
+    // taper (t goes 0 to 1, eased so the last steps change least).
+    const float over = spinnerInertia > 1.0f ? (spinnerInertia > 2.0f ? 1.0f : spinnerInertia - 1.0f) : 0.0f;
+    const float taper = 1.0f - (1.0f - over) * (1.0f - over);
     if (drive != 0.0f) {
-        // Driven: the flywheel is brought up to speed, slower when heavier.
-        const float grip = 1.0f - 0.85f * spinnerInertia;
+        // Driven: the flywheel is brought up to speed, slower when heavier:
+        // all of the gap each frame at 0, 15% of it at 1, 6% at 2.
+        const float grip = (spinnerInertia <= 1.0f) ? 1.0f - 0.85f * spinnerInertia : 0.15f - 0.09f * taper;
         flywheelSpeed += (target - flywheelSpeed) * grip;
     } else {
-        // Coasting: friction only.
-        // Up to 70% (the default, chosen by feel) the flywheel keeps 60% to 87%
-        // of its speed each frame. Above that the scale is flattened to end
-        // at 94%: the heaviest setting coasts for most of a second and then
-        // stops. A wheel that never stopped would be the truer model and no
-        // use for playing.
+        // Coasting: friction only. The share of its speed the flywheel keeps
+        // each frame: 60% to 87% up to 0.7, 94% at 1, and tapering to 97.5%
+        // at 2, where it rolls from full speed for nearly four seconds and
+        // then stops. A wheel that never stopped would be the truer model
+        // and no use for playing.
         const float keep = (spinnerInertia <= 0.0f) ? 0.0f
             : (spinnerInertia <= 0.7f) ? 0.60f + 0.39f * spinnerInertia
-            : 0.873f + (spinnerInertia - 0.7f) * (0.94f - 0.873f) / 0.3f;
+            : (spinnerInertia <= 1.0f) ? 0.873f + (spinnerInertia - 0.7f) * (0.94f - 0.873f) / 0.3f
+            : 0.94f + 0.035f * taper;
         flywheelSpeed *= keep;
         if (flywheelSpeed > -0.05f && flywheelSpeed < 0.05f)
             flywheelSpeed = 0.0f;
@@ -707,7 +712,7 @@ void retro_set_environment(retro_environment_t cb)
         { "nuance_controller", "Controller; d-pad only|analog stick|NUON analog stick (not for Tempest 3000)" },
         { "nuance_skip_controller_message", "Skip the 'controller configuration has changed' screen; disabled|enabled" },
         { "nuance_spinner_sensitivity", "Analog stick sensitivity; 100%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|175%|200%|250%|300%|400%" },
-        { "nuance_spinner_inertia", "Analog stick weight (inertia); 70%|0%|10%|20%|30%|40%|50%|60%|80%|90%|100%" },
+        { "nuance_spinner_inertia", "Analog stick weight (inertia); 100%|0%|10%|20%|30%|40%|50%|60%|70%|80%|90%|110%|120%|130%|140%|150%|160%|170%|180%|190%|200%" },
         { "nuance_spinner_invert", "Analog stick direction; normal|reversed" },
         { nullptr, nullptr }
     };
