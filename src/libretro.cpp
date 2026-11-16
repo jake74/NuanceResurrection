@@ -53,6 +53,7 @@ static uint64 perf_packets[4] = {}; // packets executed per MPE since the last N
 static std::thread emuThread;
 static bool emuThreaded = false;
 static bool emuThreadWanted = false;
+static unsigned emuClockEpoch = 0;   // counts games loaded; RunEmulation restarts its clocks when it changes
 static std::atomic<bool> emuThreadStop{false};
 static std::atomic<bool> emuMainWants{false};  // the main thread wants the emulation held
 static std::atomic<bool> emuParked{true};      // the emulation thread is not inside RunEmulation
@@ -874,6 +875,8 @@ bool retro_load_game(const struct retro_game_info *game)
 
     log_printf("libretro: nuonEnv.Init()...\n"); fflush(stderr);
     ApplyCoreOptions(); // the controller's kind has to be known before the BIOS sets it up
+    emuClockEpoch++;    // RunEmulation starts its clocks again
+    nuonEnv.MPE3wait_fieldCounter = 0; // a wait left over from the last game would hold MPE3 until a field that is now far off
     nuonEnv.Init();
     log_printf("libretro: nuonEnv.Init() done\n"); fflush(stderr);
     ApplyCoreOptions();
@@ -987,10 +990,23 @@ static void RunEmulation(const bool bThreaded)
 {
     nuonEnv.trigger_render_video = false;
     uint32 cycles = 0;
-    static uint64 last_time0 = useconds_since_start();
-    static uint64 last_time1 = useconds_since_start();
-    static uint64 last_time2 = useconds_since_start();
-    static uint64 last_time3 = useconds_since_start();
+    // The times the timers, the video field and the audio period last
+    // happened, and the MPE speed limit's account. They are started afresh
+    // for each game (emuClockEpoch, see retro_load_game): the clock they are
+    // measured on restarts when a game is loaded, and left alone they would
+    // lie in the future - no video field, no timer and no MPE3 until the new
+    // clock had caught up with the old game's playing time.
+    static uint64 last_time0, last_time1, last_time2, last_time3;
+    static int64_t mpeCredit[4];
+    static uint64 mpeCreditTime;
+    static uint64 lastCheck;
+    static unsigned clockEpoch = ~0u;
+    if (clockEpoch != emuClockEpoch) {
+        clockEpoch = emuClockEpoch;
+        last_time0 = last_time1 = last_time2 = last_time3 = mpeCreditTime = useconds_since_start();
+        mpeCredit[0] = mpeCredit[1] = mpeCredit[2] = mpeCredit[3] = 1;
+        lastCheck = 0;
+    }
     const uint64 frame_budget_start = useconds_since_start();
     // During BIOS init (before video is configured), allow longer execution time
     // Use 100ms budget for first 100 frames to allow BIOS init to complete
@@ -1005,8 +1021,6 @@ static void RunEmulation(const bool bThreaded)
     // to the MPEs that are behind. NUANCE_MPE_HZ=<packets per second>
     // changes the rate; 0 removes the limit.
     static const int64_t mpeHz = getenv("NUANCE_MPE_HZ") ? atoll(getenv("NUANCE_MPE_HZ")) : 54000000;
-    static int64_t mpeCredit[4] = { 1, 1, 1, 1 };
-    static uint64 mpeCreditTime = useconds_since_start();
     while (bRun && (bThreaded ? (!emuMainWants.load(std::memory_order_relaxed) && !emuThreadStop.load(std::memory_order_relaxed)) : !nuonEnv.trigger_render_video))
     {
         cycles++;
@@ -1036,7 +1050,6 @@ static void RunEmulation(const bool bThreaded)
             {
                 // NUANCE_PERF: report any gap of more than 20 ms between two looks
                 // at the clock - the emulation stood still for that long.
-                static uint64 lastCheck = 0;
                 static const bool bStalls = getenv("NUANCE_PERF") != nullptr;
                 if (bStalls && lastCheck && new_time - lastCheck > 20000)
                     log_printf("libretro: perf: emulation stalled for %.0f ms (MPE pcs %08X %08X %08X %08X)\n", (new_time - lastCheck) / 1000.0,

@@ -1515,7 +1515,10 @@ void VidSync(MPE& mpe) // should wait (as seen by the app) for mpe.regs[0] field
     static double frameDue = 0.0;
     static uint32 scheduleFps = 0;
     const double interval = 60.0 / (double)nuonEnv.maxGameFps;
-    if(scheduleFps != nuonEnv.maxGameFps || frameDue == 0.0 || (double)fieldCounter > frameDue + interval)
+    // (The last test is for a field counter that has gone backwards: a new
+    // game starts it again from nothing.)
+    if(scheduleFps != nuonEnv.maxGameFps || frameDue == 0.0 || (double)fieldCounter > frameDue + interval
+       || (double)fieldCounter < frameDue - interval - 1.0)
     {
       scheduleFps = nuonEnv.maxGameFps;
       frameDue = (double)fieldCounter; // first frame, or one that took too long: nothing to wait for
