@@ -1721,6 +1721,18 @@ void VidSetCLUTRange(MPE &mpe)
   mpe.regs[0] = (count == numColors) ? 1 : 0;
 }
 
+// For a frontend that loads one game after another in the same process: the
+// display goes back to how it is before a game has set anything up. Without
+// this the new game's first frames were drawn with the last game's video
+// settings, over memory that was being cleared and loaded - a flash of
+// garbage (magenta, on the tablet it was seen on) before the real picture.
+void VideoReset()
+{
+  bCanDisplayVideo = false;
+  bMainChannelActive = false;
+  bOverlayChannelActive = false;
+}
+
 void VideoCleanup()
 {
   if(bUseSeparateThread) gfx_lock.lock();

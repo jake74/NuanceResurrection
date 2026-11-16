@@ -627,6 +627,7 @@ static void Erase()
 // after nuance.cfg has been read, and again whenever the frontend says an
 // option has changed.
 void VideoReinstallShaders(); // video.cpp
+void VideoReset();            // video.cpp
 static void ApplyCoreOptions()
 {
     struct retro_variable var = { "nuance_scanlines", nullptr };
@@ -882,6 +883,7 @@ bool retro_load_game(const struct retro_game_info *game)
 
     log_printf("libretro: nuonEnv.Init()...\n"); fflush(stderr);
     ApplyCoreOptions(); // the controller's kind has to be known before the BIOS sets it up
+    VideoReset();       // nothing of the last game's display is carried over
     emuClockEpoch++;    // RunEmulation starts its clocks again
     nuonEnv.MPE3wait_fieldCounter = 0; // a wait left over from the last game would hold MPE3 until a field that is now far off
     nuonEnv.Init();
