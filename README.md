@@ -19,7 +19,7 @@ the speed of the original hardware.
 **Made with AI.** The additions in this fork were written with an AI coding
 assistant, directed and play-tested by Jake Smith. That applies to this
 fork's changes only: Nuance itself, and the work of the NuanceResurrection
-contributors it is built on, are theirs and were not.
+contributors it is built on, are theirs, and this note says nothing about them.
 
 ## Disclaimer
 
