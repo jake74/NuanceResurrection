@@ -736,6 +736,13 @@ void retro_set_audio_sample_batch(retro_audio_sample_batch_t cb) { audio_batch_c
 void retro_set_input_poll(retro_input_poll_t cb) { input_poll_cb = cb; }
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
 
+// Not part of libretro: how many frames the game has drawn since it was
+// loaded (its VidSync calls). A frontend that wants to show the game's own
+// frame rate, which is not the 60 a second retro_run is called at, looks
+// this up by name in the core library and takes differences.
+extern unsigned perfVidSyncTotal; // video.cpp
+extern "C" __attribute__((visibility("default"))) unsigned nuance_game_frame_count(void) { return perfVidSyncTotal; }
+
 unsigned retro_api_version(void) { return RETRO_API_VERSION; }
 
 void retro_get_system_info(struct retro_system_info *info)
