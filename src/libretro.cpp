@@ -401,7 +401,7 @@ extern unsigned perfVidSyncTotal;       // video.cpp: game frames drawn
 enum { CONTROL_DPAD, CONTROL_STICK, CONTROL_NUON_ANALOG };
 static int controlMode = CONTROL_DPAD;
 static float spinnerSensitivity = 1.0f; // 1 = full stick is the fastest the game moves the claw
-static float spinnerInertia = 1.0f;     // 0 = stops with the stick, 1 = coasts for over a second, 2 = for nearly four
+static float spinnerInertia = 0.85f;    // 0 = stops with the stick, 1 = coasts for over a second, 2 = for nearly four; the option's 100% is 0.85
 static float spinnerDirection = 1.0f;
 static float flywheelSpeed = 0.0f;      // counts per game frame
 static double mouseOwed = 0.0;          // mouse movement since the last game frame, in counts
@@ -438,7 +438,7 @@ static void ApplyAnalogControls()
     constexpr float kFullStickCountsPerGameFrame = 14.0f; // just past where the game's response tops out
     constexpr double kMaxCountsPerRead = 100.0;
     const float target = drive * kFullStickCountsPerGameFrame * spinnerSensitivity * spinnerDirection;
-    // The weight runs from 0 to 2 (0% to 200%), default 1. Past 1 both scales
+    // The weight runs from 0 to 1.7 (the option's 0% to 200%), default 0.85. Past 1 both scales
     // taper (t goes 0 to 1, eased so the last steps change least).
     const float over = spinnerInertia > 1.0f ? (spinnerInertia > 2.0f ? 1.0f : spinnerInertia - 1.0f) : 0.0f;
     const float taper = 1.0f - (1.0f - over) * (1.0f - over);
@@ -681,7 +681,9 @@ static void ApplyCoreOptions()
         spinnerSensitivity = atoi(var.value) / 100.0f;
     var = { "nuance_spinner_inertia", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-        spinnerInertia = atoi(var.value) / 100.0f;
+        // The option's 100% is the weight nagori3k was tuned to by play, which
+        // is 0.85 on the scale the flywheel works in; 0% is no flywheel.
+        spinnerInertia = atoi(var.value) / 100.0f * 0.85f;
     var = { "nuance_spinner_invert", nullptr };
     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
         spinnerDirection = !strcmp(var.value, "reversed") ? -1.0f : 1.0f;
