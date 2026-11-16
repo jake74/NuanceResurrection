@@ -626,6 +626,63 @@ Changes this needed: the temporary folder for unpacked discs comes from
 RGBA on OpenGL ES; `[Arm64NativeCode] Auto` now means on for Android as
 well as for Apple silicon Macs.
 
+### Speed in busy scenes: what was measured (2026-11-16)
+
+Aim: the busiest scenes of Tempest 3000 still fall below 30 frames a
+second. No speed-up came out of this round; what follows is what is now
+known, so that the next round starts in the right place.
+
+**No script reaches a busy scene.** Scripted games (firing, sweeping the
+stick, or starting from a later level) hold 29-30 on the Mac and 27-29 on
+the Pad. Busy scenes come from real play. A saturated host was simulated
+instead by running the headless host on the Pad's four slow cores
+(`taskset 0f`), where the same script gives about 16 frames a second.
+
+**Where the emulation thread's time goes.** A profiler cannot be trusted
+here (it cannot unwind out of generated code), so the perf log now has its
+own split, from a thread that samples what the emulation thread says it is
+doing, and the share of time by MPE:
+
+| | Mac, no limits | Pad, slow cores |
+|---|---|---|
+| Generated code | 56% | 44% |
+| Interpreter | 8-9% | 9-10% |
+| Dispatcher and the rest | 36% | 46% |
+
+Saturated, MPE0 has 43% of the thread's time, MPE1 21%, MPE2 18%, MPE3 18%.
+
+**What did not help**, each tried on the saturated Pad:
+
+- Compiling MPE0's packets that are marked compiled but have no block
+  (`NUANCE_A64_RECOMPILE_MARKED=1`): MPE0 runs 35 million packets a second
+  instead of 22, frame rate unchanged. The extra packets are its wait loop.
+- Keeping MPE0, MPE1 and MPE2 level in packets run: no gain, because MPE1
+  and MPE2 are not starved; they halt between jobs.
+- Letting MPE3 take a turn whenever any other MPE does: no gain.
+- The narrow form of the MPE3 packet hack (`NUANCE_MPE3_HACK=2`), which
+  would let MPE3 run several times faster: the game breaks (3 frames a
+  second, stalls).
+- Giving MPE0 one turn in two, four or eight: the frame rate falls in
+  step (16, 15, 11, 8). MPE0's work is on the critical path.
+
+So with one block per MPE per round, the frame rate follows the number of
+rounds a second, and a round's cost is spread over generated code and the
+dispatcher. The two things left that could give tens of percent are the
+ones this plan has listed before, and they belong together: compile the
+remaining interpreted packets (so that blocks chain), then link blocks
+directly so that a chain does not come back through the dispatcher. Both
+are several days' work with the differential test as the safety net.
+
+**What did help, for power and heat:** the emulation thread no longer spins
+through rounds in which nothing can run. Halted MPEs keep their allowance,
+so "every MPE is out of allowance" was never true and a quarter of the
+thread's time went on empty rounds. It now sleeps 50 microseconds when a
+round runs no packet. Same frame rate and audio; processor time for a
+scripted game down from 95% of a core to 68%.
+
+Also added: `NUANCE_MPE3_HACK` (override the packet hack), and
+`tools/perf_host.c` is the tool for all of the above.
+
 ## Scope
 
 - In: macOS Arm64 (libretro core). Linux and Android Arm64 should come along

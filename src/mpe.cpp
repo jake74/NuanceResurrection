@@ -1852,6 +1852,9 @@ void MPE::UpdateInvalidateRegion(const uint32 start, const uint32 length)
 bool MPE::FetchDecodeExecute()
 {
   cycleCounter = 0;
+#ifdef USE_A64_JIT
+  a64DebugBlockMpe = mpeIndex; // whose turn it is, for the time split in the NUANCE_PERF report
+#endif
   if(mpectl & MPECTRL_MPEGO)
   {
     //StartPerformanceTimer();
@@ -2253,7 +2256,13 @@ bool MPE::FetchDecodeExecute()
         //prevPcexec = pcexec;
         pcroute = pInstructionCacheEntry->pcroute;
         pcexec = pcroute;
+#ifdef USE_A64_JIT
+        a64DebugBlockRunning = 2; // interpreting, for the time split in the NUANCE_PERF report
+#endif
         ExecuteNuances(*pInstructionCacheEntry);
+#ifdef USE_A64_JIT
+        a64DebugBlockRunning = 0;
+#endif
       }
       else if(/*pcexec >= ROM_BIOS_BASE &&*/ pcexec < ROM_PE_BASE)
       {

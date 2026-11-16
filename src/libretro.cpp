@@ -47,6 +47,8 @@
 
 extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls, perfVidSyncFields; // video.cpp
 static uint64_t perfAudioFrames = 0;
+static std::atomic<uint64_t> perfMpeTime[4]; // samples by whose turn it was, sleep left out
+static std::atomic<uint64_t> perfState[4]; // samples of a64DebugBlockRunning: 0 dispatcher, 1 generated code, 2 interpreter, 3 asleep
 static uint64 perf_packets[4] = {}; // packets executed per MPE since the last NUANCE_PERF report
 
 // Emulation thread state (see "Emulation thread" below).
@@ -1036,25 +1038,42 @@ static void RunEmulation(const bool bThreaded)
 
         // MPE3 takes its turn only in a round where all the others take theirs.
         // Tempest 3000 hangs if MPE3 gains on another MPE (see bMPE3PacketHack),
-        // which it would if it kept running while they sat out. It ends up
-        // slower than without the limit; the game's frame rate does not notice.
+        // which it would if it kept running while they sat out.
+        //
+        // (Tried on a host too slow to keep up, 2026-11-16, and dropped because
+        // none of them raised the game's frame rate: keeping MPE0 to MPE2 level
+        // in packets run; letting MPE3 run when any other does; the narrow form
+        // of the packet hack, which breaks the game outright; and giving MPE0
+        // fewer turns, which lowers the frame rate in step - MPE0's work is on
+        // the critical path. See docs/arm64-jit-plan.md.)
         const bool bOthersRun = !mpeHz || (mpeCredit[0] > 0 && mpeCredit[1] > 0 && mpeCredit[2] > 0);
-        // Nothing to run until more time has passed: go and look at the clock.
-        const bool bIdleRound = mpeHz && mpeCredit[0] <= 0 && mpeCredit[1] <= 0 && mpeCredit[2] <= 0;
+        uint32 packetsThisRound = 0;
         for (int i = 3; i >= 0; --i)
             if ((i == 3) ? (bOthersRun && nuonEnv.MPE3wait_fieldCounter == 0) : (!mpeHz || mpeCredit[i] > 0)) {
                 nuonEnv.mpe[i].FetchDecodeExecute();
-                perf_packets[i] += nuonEnv.mpe[i].cycleCounter;
-                mpeCredit[i] -= nuonEnv.mpe[i].cycleCounter;
+                const uint32 ran = nuonEnv.mpe[i].cycleCounter;
+                perf_packets[i] += ran;
+                mpeCredit[i] -= ran;
+                packetsThisRound += ran;
             }
+        // A round in which no MPE ran a packet - each one halted, out of its
+        // allowance, or waiting for a video field - will be followed by more
+        // of the same until time has passed: sleep a moment and look at the
+        // clock, instead of going round as fast as the host can. (Halted MPEs
+        // keep their allowance, so "all out of allowance" was not test enough:
+        // a quarter of the thread's time went on empty rounds.)
+        const bool bIdleRound = mpeHz && packetsThisRound == 0;
 
         if (nuonEnv.pendingCommRequests)
             DoCommBusController();
 
         if ((cycles % 5000) == 0 || bIdleRound)
         {
-            if (bIdleRound && bThreaded)
+            if (bIdleRound && bThreaded) {
+                a64DebugBlockRunning = 3; // asleep, for the time split in the NUANCE_PERF report
                 usleep(50);
+                a64DebugBlockRunning = 0;
+            }
             const uint64 new_time = useconds_since_start();
             {
                 // NUANCE_PERF: report any gap of more than 20 ms between two looks
@@ -1066,7 +1085,7 @@ static void RunEmulation(const bool bThreaded)
                 lastCheck = new_time;
             }
             if (mpeHz) {
-                // At most 4 ms of credit, so a stall is not followed by a burst.
+                // At most 4 ms of allowance, so a stall is not followed by a burst.
                 const int64_t earned = (int64_t)((new_time - mpeCreditTime) * (uint64)mpeHz / 1000000);
                 const int64_t most = (int64_t)mpeHz / 250;
                 for (int i = 0; i < 4; i++)
@@ -1157,6 +1176,21 @@ static void RunEmulation(const bool bThreaded)
 
 static void EmuThreadMain()
 {
+    // With NUANCE_PERF, a second thread that samples what this one is doing.
+    static bool bSampler = false;
+    if (!bSampler && getenv("NUANCE_PERF")) {
+        bSampler = true;
+        std::thread([]() {
+            for (;;) {
+                usleep(100);
+                if (!emuParked.load(std::memory_order_relaxed)) {
+                    const unsigned state = a64DebugBlockRunning & 3;
+                    perfState[state]++;
+                    if (state != 3) perfMpeTime[a64DebugBlockMpe & 3]++;
+                }
+            }
+        }).detach();
+    }
 #if defined(__APPLE__)
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); // keep it on a performance core
 #endif
@@ -1375,6 +1409,22 @@ void retro_run(void)
         // needs. Less than the nominal rate means the game did not refill its
         // buffer in time and there are gaps in the sound.
         {
+            {
+                // Where the emulation thread's time went: a sampling thread looks ten
+                // thousand times a second at what the thread says it is doing. This
+                // is the only breakdown to trust; a profiler cannot unwind out of
+                // generated code and charges much of it to the dispatcher.
+                const uint64_t n = perfState[0] + perfState[1] + perfState[2] + perfState[3];
+                if (n)
+                    log_printf("libretro: perf: emulation thread: %.0f%% generated code, %.0f%% interpreter, %.0f%% dispatcher and the rest, %.0f%% asleep\n",
+                        100.0 * perfState[1] / n, 100.0 * perfState[2] / n, 100.0 * perfState[0] / n, 100.0 * perfState[3] / n);
+                const uint64_t busy = perfMpeTime[0] + perfMpeTime[1] + perfMpeTime[2] + perfMpeTime[3];
+                if (busy)
+                    log_printf("libretro: perf: of its busy time: MPE0 %.0f%%, MPE1 %.0f%%, MPE2 %.0f%%, MPE3 %.0f%%\n",
+                        100.0 * perfMpeTime[0] / busy, 100.0 * perfMpeTime[1] / busy, 100.0 * perfMpeTime[2] / busy, 100.0 * perfMpeTime[3] / busy);
+                perfMpeTime[0] = perfMpeTime[1] = perfMpeTime[2] = perfMpeTime[3] = 0;
+                perfState[0] = perfState[1] = perfState[2] = perfState[3] = 0;
+            }
             log_printf("libretro: perf: audio %.0f frames/s delivered, %.0f needed for continuous sound\n", perfAudioFrames / secs, (double)nuonEnv.nuonAudioPlaybackRate);
             perfAudioFrames = 0;
         }

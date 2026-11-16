@@ -584,6 +584,10 @@ void NuonEnvironment::Init()
   if(const char * const a64Jit = getenv("NUANCE_ARM64_JIT"))
     compilerOptions.bArm64NativeCode = (atoi(a64Jit) != 0);
 #endif
+  // NUANCE_MPE3_HACK=0, 1 or 2 overrides [MPE3PacketHack]: off, on, or on only
+  // for the range Tempest 3000's level select needs.
+  if(const char * const hack = getenv("NUANCE_MPE3_HACK"))
+    compilerOptions.bMPE3PacketHack = (char)atoi(hack);
   // NUANCE_MAX_FPS=<frames per second> overrides [MaxFrameRate]; 0 removes the limit.
   if(const char * const maxFps = getenv("NUANCE_MAX_FPS"))
   {
