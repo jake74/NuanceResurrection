@@ -492,6 +492,16 @@ void NuonEnvironment::WriteFile(MPE &MPE, uint32 fd, uint32 buf, uint32 len)
 void NuonEnvironment::Init()
 {
   init_nuon_mem(mainBusDRAM, MAIN_BUS_SIZE);
+  // Main-bus RAM is where games put their frame buffers, and a game may show
+  // one, or build on one, before it has written to it: Tempest 3000 starts
+  // every game by fading down whatever was there. The 0xCD filler is bright
+  // magenta as a YCrCb pixel, so that is what the game opened with. Black
+  // (Y 16, Cr 128, Cb 128, alpha 0) is what it gets instead. Like 0xCD, it is
+  // a value no game can be relying on.
+  for(uint32 i = 0; i + 3 < MAIN_BUS_SIZE; i += 4)
+  {
+    mainBusDRAM[i] = 0x10; mainBusDRAM[i + 1] = 0x80; mainBusDRAM[i + 2] = 0x80; mainBusDRAM[i + 3] = 0x00;
+  }
   init_nuon_mem(systemBusDRAM, SYSTEM_BUS_SIZE);
 
   dvdBase = new char[1];
