@@ -220,6 +220,20 @@ Jake's other titles are `.mdf` or `.zip`, which the core does not read.
 Tempest 3000 has no widescreen mode (it never calls `VidQueryConfig`),
 hence the stretch option.
 
+Core changes of 2026-11-16 and 17, found while the apps were in use:
+
+- The stick weight option runs 0%-200% with 100% the default. 100% is the
+  weight settled on by play (0.85 on the flywheel's own scale); 0% is the
+  game's own response with no flywheel. Above the flywheel's 1.0 the spin-up
+  and the coasting both taper, so the heaviest wheel still stops.
+- Scanlines switched during a game left the picture black: the new shader
+  was only installed when the game next changed its display. It is now
+  installed on the next frame.
+- Scanlines on OpenGL ES drew no lines, mask or vignette, only a darker
+  picture: the output coordinates the shader works from were filled in on
+  the display-list path alone, which ES skips. Seen on the Pad, fixed, and
+  confirmed there by eye.
+
 ### Features
 
 - **Library.** The user picks a folder; the app keeps access to it across
