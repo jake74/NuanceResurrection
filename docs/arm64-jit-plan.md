@@ -628,6 +628,11 @@ well as for Apple silicon Macs.
 
 ### Speed in busy scenes: what was measured (2026-11-16)
 
+The plan for the next round, written from this section and the code, is in
+[speed-plan.md](speed-plan.md) (2026-11-17). It starts with a measurement
+stage, because reading the code showed that "dispatcher and the rest" below
+holds a good deal more than the dispatcher.
+
 Aim: the busiest scenes of Tempest 3000 still fall below 30 frames a
 second. No speed-up came out of this round; what follows is what is now
 known, so that the next round starts in the right place.
