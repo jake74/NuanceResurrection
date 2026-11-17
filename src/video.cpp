@@ -464,6 +464,10 @@ void IncrementVideoFieldCounter()
 void VideoReinstallShaders()
 {
   bShadersInstalled = false;
+  // The install happens in UpdateTextureStates, which otherwise only runs
+  // when a game changes its display. Without this nothing put a program
+  // back, and the picture stayed black whichever way the option went next.
+  videoTexInfo.bUpdateTextureStates = true;
 }
 
 void VideoInvalidateGLState()
