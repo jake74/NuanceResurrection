@@ -632,6 +632,16 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
 
   unsigned numCompared = 0, numNotCompiled = 0, numOutside = 0, numMismatched = 0, numUndefined = 0, numLogged = 0;
   unsigned numWithMemory = 0, numWithBranch = 0, numBranchTaken = 0;
+  // Runs whose first delay slot holds a ",nop" branch (the case S1.2 of docs/speed-plan.md
+  // compiles), by what the interpreter did with them: [outer branch taken][the
+  // inner branch's condition true]. Class 4 is a run the interpreter did not get
+  // as far as the inner branch with (it left the test's memory, or never finished).
+  // NUANCE_A64_DIFFTEST_SLOT1=0 leaves these runs out, which gives back the runs
+  // the generator made before they were added.
+  static const bool bGenSlot1 = !(getenv("NUANCE_A64_DIFFTEST_SLOT1") && atoi(getenv("NUANCE_A64_DIFFTEST_SLOT1")) == 0);
+  Rng modeRng = { 0xD1B54A32D192ED03ULL ^ ((uint64)seed << 7) ^ 1 };
+  unsigned s1Generated = 0;
+  unsigned s1Compared[5] = {}, s1NotCompiled[5] = {}, s1Outside[5] = {}, s1Mismatched[5] = {}, s1Undefined[5] = {}, s1Covered[5] = {};
   std::map<std::string, unsigned> mismatchByHandler;
   constexpr uint32 kNumHandlers = Handler_PacketStart;
   static unsigned handlerRuns[kNumHandlers];
@@ -649,6 +659,8 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     uint32 cursor = kCodeBase;
     g_runPointers.clear();
     bool bHasBranch = false, bHasMemory = false;
+    bool bSlot1Branch = false;
+    uint32 outerPc = 0, slot1Pc = 0, slot1Next = 0;
     for(uint32 n = 0; n < numPackets && !bHasBranch; n++)
     {
       uint32 info = 0;
@@ -665,10 +677,30 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
         // branch gets a branch of its own, of the ",nop" kind: the pattern
         // FetchSuperBlock compiles with a run-time check of ecuSkipCounter.
         const bool bDelayedConditional = (info & kBranchMask) == PACKETINFO_BRANCH_CONDITIONAL;
+        // One time in four (drawn from a generator of its own, so that the
+        // other choices are the ones made without it), the FIRST delay slot
+        // gets a ",nop" branch instead: S1.2. Then the second slot is a plain packet.
+        const bool bPickSlot1 = bGenSlot1 && bDelayedConditional && modeRng.Below(4) == 0;
+        outerPc = cursor - length;
         for(int slot = 0; slot < 2; slot++)
         {
           uint32 slotLength = 0;
-          if(slot == 1 && bDelayedConditional && rng.Below(3) == 0)
+          if(slot == 0 && bPickSlot1)
+          {
+            for(int attempt = 0; attempt < 64; attempt++)
+            {
+              slotLength = PlacePacket(rng, mpe, mem, cursor, true, info);
+              if(slotLength && (info & PACKETINFO_BRANCH_NOP))
+                break;
+              slotLength = 0;
+            }
+            if(slotLength)
+            {
+              bSlot1Branch = true;
+              slot1Pc = cursor;
+            }
+          }
+          if(slot == 1 && bDelayedConditional && !bSlot1Branch && rng.Below(3) == 0)
           {
             for(int attempt = 0; attempt < 64; attempt++)
             {
@@ -681,6 +713,8 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
           if(!slotLength)
             slotLength = PlacePacket(rng, mpe, mem, cursor, false, info);
           cursor += slotLength;
+          if(slot == 0 && bSlot1Branch)
+            slot1Next = cursor;
           if(info & PACKETINFO_MEM)
             bHasMemory = true;
         }
@@ -710,11 +744,15 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     TracePointer(&mpe.dtrom[(initial.sp + 64) & MPE_VALID_MEMORY_MASK]);
     a64MemoryTraceHook = TraceHook;
     bool bUndefinedInput = false;
+    bool bOuterTaken = false, bInnerTrue = false, bInnerReached = false;
+    if(bSlot1Branch)
+      s1Generated++;
     for(int step = 0; step < 16; step++)
     {
       if(mpe.ecuSkipCounter == 0 && (mpe.pcexec < kCodeBase || mpe.pcexec >= endAddress))
         break;
       uint32 sequentialNext = 0;
+      const uint32 pcBeforeStep = mpe.pcexec;
       if(mpe.pcexec >= kCodeBase && mpe.pcexec < endAddress)
       {
         // A multiply whose shift count comes from a register can still meet
@@ -745,8 +783,27 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
             bUndefinedInput = true;
         }
         sequentialNext = entry.pcroute;
+        if(bSlot1Branch && pcBeforeStep == slot1Pc)
+        {
+          // What the inner branch's condition is, whether or not the outer branch
+          // lets it be evaluated. (The condition reads the flags as the packet
+          // starts: tempCC, which the interpreter sets from cc before it runs the packet.)
+          bInnerReached = true;
+          if(entry.packetInfo & PACKETINFO_BRANCH_ALWAYS)
+            bInnerTrue = true;
+          else
+          {
+            const Nuance &branch = (Nuance &)(entry.nuances[FIXED_FIELD(entry.nuanceCount - 1,0)]);
+            const uint32 savedTempCC = mpe.tempCC;
+            mpe.tempCC = mpe.cc;
+            bInnerTrue = mpe.TestConditionCode((uint32_t)branch.fields[FIELD_ECU_CONDITION]);
+            mpe.tempCC = savedTempCC;
+          }
+        }
       }
       mpe.FetchDecodeExecute();
+      if(bSlot1Branch && pcBeforeStep == outerPc)
+        bOuterTaken = (mpe.ecuSkipCounter != 0);
       // A branch that has been taken ends the run, wherever it went: a target
       // inside the run would be the middle of some instruction.
       if(mpe.ecuSkipCounter == 0 && mpe.pcexec != sequentialNext)
@@ -755,6 +812,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     a64MemoryTraceHook = nullptr;
 
     const bool bInterpreterFinished = (mpe.ecuSkipCounter == 0) && (mpe.mpectl & MPECTRL_MPEGO);
+    const unsigned s1Class = !bSlot1Branch ? 5 : !bInnerReached ? 4 : (bOuterTaken ? 2 : 0) + (bInnerTrue ? 1 : 0);
     MachineState interpreted;
     CaptureState(mpe, interpreted);
     for(TraceEntry &entry : g_trace)
@@ -766,6 +824,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
       // The run reached memory the test does not control, looped back into
       // itself, or stopped the processor. Nothing to compare.
       numOutside++;
+      if(s1Class < 5) s1Outside[s1Class]++;
       continue;
     }
 
@@ -782,6 +841,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
        cacheEntry->compileType != SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_NATIVE_CODE_BLOCK)
     {
       numNotCompiled++;
+      if(s1Class < 5) s1NotCompiled[s1Class]++;
       continue;
     }
     const uint32 blockEnd = cacheEntry->nextVirtualAddress;
@@ -815,7 +875,14 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     // (A block can also stop early and hand one packet back to the
     // interpreter - an indirect store that turns out to need it does. That
     // is not a branch; the loop below carries on from there.)
-    bool bBranched = (mpe.ecuSkipCounter == 0 && mpe.pcexec != blockEnd && !mpe.interpretNextPacket);
+    // (A ",nop" branch in the first delay slot can have the next packet, the
+    // second delay slot, as its target (when the outer branch was not taken). Taken or not, the interpreter's run then
+    // goes on at that packet, and the test treats it so on both sides: the block
+    // has left early, with the branch pending or resolved, and the dispatcher
+    // carries on from the target as it would after any block. Its pcexec is then
+    // not "somewhere else", and must not end the comparison before that packet has run.)
+    const bool bTargetIsNextPacket = bSlot1Branch && !bOuterTaken && mpe.pcexec == slot1Next && mpe.pcexec != blockEnd;
+    bool bBranched = (mpe.ecuSkipCounter == 0 && mpe.pcexec != blockEnd && !bTargetIsNextPacket && !mpe.interpretNextPacket);
     for(int step = 0; step < 16 && !bBranched; step++)
     {
       if(mpe.ecuSkipCounter == 0 && (mpe.pcexec < kCodeBase || mpe.pcexec >= endAddress))
@@ -835,6 +902,11 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     CaptureState(mpe, native);
 
     numCompared++;
+    if(s1Class < 5)
+    {
+      s1Compared[s1Class]++;
+      if(bRanNatively && blockEnd > slot1Pc) s1Covered[s1Class]++;
+    }
     for(uint32 pc = kCodeBase; pc < endAddress; )
     {
       InstructionCacheEntry entry;
@@ -904,10 +976,12 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     if(bUndefinedInput)
     {
       numUndefined++;
+      if(s1Class < 5) s1Undefined[s1Class]++;
       continue;
     }
 
     numMismatched++;
+    if(s1Class < 5) s1Mismatched[s1Class]++;
     const std::string code = Disassemble(mpe, mem, kCodeBase, endAddress);
     // Key the tally on the mnemonic of a single-instruction run; longer runs go
     // under one heading, since any of their instructions could be the one.
@@ -946,6 +1020,14 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
   Log("Arm64 JIT difftest: not compared: %u not compiled natively, %u reached outside the test's memory or did not finish; %u differed only where the instruction set leaves the result undefined",
     numNotCompiled, numOutside, numUndefined);
   Log("Arm64 JIT difftest: %s", stats);
+  {
+    // The runs with a ",nop" branch in the first delay slot of a conditional branch (S1.2).
+    static const char * const kClassNames[5] = { "outer not taken, inner false", "outer not taken, inner true", "outer taken, inner false", "outer taken, inner true", "interpreter did not reach the inner branch" };
+    Log("Arm64 JIT difftest: slot-1 ,nop branch runs: %u generated%s", s1Generated, bGenSlot1 ? "" : " (NUANCE_A64_DIFFTEST_SLOT1=0)");
+    for(unsigned c = 0; c < 5; c++)
+      Log("Arm64 JIT difftest:   slot 1, %-42s: %u compared (%u of them with the inner branch inside the native block), %u mismatched, %u not compiled natively, %u outside or unfinished, %u undefined-only",
+        kClassNames[c], s1Compared[c], s1Covered[c], s1Mismatched[c], s1NotCompiled[c], s1Outside[c], s1Undefined[c]);
+  }
 
   // Which instruction handlers that have an emitter never came up. The
   // numbers are positions in the Handlers enum (Handlers.h).

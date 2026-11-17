@@ -1096,6 +1096,30 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               slotBlockers = 0;
               a64GuardedPacketPc = packetDelaySlot2.pcexec;
             }
+            // The same for a ",nop" branch in the FIRST delay slot (S1.2 of
+            // docs/speed-plan.md): "bra gt, A / bra B, nop / <plain packet>". If
+            // the first branch is taken the second is not evaluated, as before;
+            // otherwise the second is an ordinary non-delayed branch and, when
+            // it is taken, the block ends there: Emit_ExitBlock leaves with
+            // pcfetchnext set and ecuSkipCounter at 1, so the second delay slot
+            // is not run, exactly as the interpreter leaves it unrun. Unlike in
+            // the second slot there is a packet after the branch inside the
+            // block, so what dead-code elimination may do needs care (see the
+            // SYNC mark below). Only this shape: the second slot must be free of
+            // blockers, so no second guarded packet is needed, and the inner
+            // branch must be the ",nop" kind (a delayed one would need delay
+            // slots of its own, which lie outside the block: S1.3).
+            bool bSlot1Guarded = false;
+            if(!a64GuardedPacketPc && a64CompileSlotBranches && bCanEmitNativeCode
+              && ((packet.packetInfo & (PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_ALWAYS)) == PACKETINFO_BRANCH_CONDITIONAL)
+              && ((packetDelaySlot1.packetInfo & DELAY_SLOT_BLOCKERS) == PACKETINFO_ECU)
+              && (packetDelaySlot1.packetInfo & PACKETINFO_BRANCH_NOP)
+              && !(packetDelaySlot2.packetInfo & DELAY_SLOT_BLOCKERS))
+            {
+              slotBlockers = 0;
+              bSlot1Guarded = true;
+              a64GuardedPacketPc = packetDelaySlot1.pcexec;
+            }
 #endif
             if(slotBlockers)
             {
@@ -1154,6 +1178,18 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
                 bCanEmitNativeCode = bCanEmitNativeCode && bPacketAllowsNativeCode;
                 numInstructions += (packetDelaySlot1.nuanceCount + 2);
                 numPackets++;
+#ifdef USE_A64_JIT
+                // The guarded ",nop" branch can leave the block here, with the
+                // second delay slot unrun. Dead-code elimination works backwards
+                // and drops a write that a later packet overwrites before it is
+                // read; with an exit in between, that write is live on the exit
+                // path. SYNC on this packet's PACKETEND resets what the later
+                // packets are allowed to kill (the same mark the end of every
+                // block carries), so nothing written up to and including this
+                // packet is removed on account of the second delay slot.
+                if(bSlot1Guarded)
+                  instructions[numInstructions - 1].flags |= SUPERBLOCKINFO_SYNC;
+#endif
               }
               packetCounter--;
 
