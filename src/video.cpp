@@ -310,6 +310,18 @@ void UpdateTextureStates()
 
 void UpdateDisplayList()
 {
+  // Where each corner is on the output, in pixels. The scanline shader draws
+  // its lines, mask and vignette from these, so they are needed on every
+  // path: left at zero (as they were on OpenGL ES) it only darkens the picture.
+  videoTexInfo.windowTexCoords[0] = 0.f;
+  videoTexInfo.windowTexCoords[1] = 0.f;
+  videoTexInfo.windowTexCoords[2] = 0.f;
+  videoTexInfo.windowTexCoords[3] = (float)display.clientHeight;
+  videoTexInfo.windowTexCoords[4] = (float)display.clientWidth;
+  videoTexInfo.windowTexCoords[5] = (float)display.clientHeight;
+  videoTexInfo.windowTexCoords[6] = (float)display.clientWidth;
+  videoTexInfo.windowTexCoords[7] = 0.f;
+
 #if defined(NUANCE_GLES)
   // Display lists went out with the compatibility profile and OpenGL ES never
   // had them. They are only still built for the no-shader fallback, which
@@ -325,15 +337,6 @@ void UpdateDisplayList()
     videoTexInfo.displayListName[2] = glGenLists(1);
     videoTexInfo.displayListName[3] = glGenLists(1);
   }
-
-  videoTexInfo.windowTexCoords[0] = 0.f;
-  videoTexInfo.windowTexCoords[1] = 0.f;
-  videoTexInfo.windowTexCoords[2] = 0.f;
-  videoTexInfo.windowTexCoords[3] = (float)display.clientHeight;
-  videoTexInfo.windowTexCoords[4] = (float)display.clientWidth;
-  videoTexInfo.windowTexCoords[5] = (float)display.clientHeight;
-  videoTexInfo.windowTexCoords[6] = (float)display.clientWidth;
-  videoTexInfo.windowTexCoords[7] = 0.f;
 
   if(channelState == (CHANNELSTATE_MAIN_ACTIVE|CHANNELSTATE_OVERLAY_ACTIVE))
   {
