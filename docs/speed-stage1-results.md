@@ -94,6 +94,8 @@ lighter one, where the loop does not run, is unchanged. Ordinary builds,
 `NUANCE_PERF` off, game frames in 80 s including boot: 3455-3488 before,
 3523-3574 after (+2.4% over the whole run).
 
+On the Pad (Xiaomi Pad Mini), not measured; played by hand on 2026-11-17: "a little faster and a little smoother on busy scenes".
+
 The gain is larger than the one Stage 0's arithmetic predicted (about 4.6%);
 part of it is likely that turns now run longer before they end. Not measured
 on the Pad yet, and Merlin Racing has not been run on it.
