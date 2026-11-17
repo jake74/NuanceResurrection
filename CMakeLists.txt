@@ -100,6 +100,7 @@ check_cxx_source_compiles("
 int main() { return 0; }" NUANCE_TARGET_AARCH64)
 if(NUANCE_TARGET_AARCH64 AND NOT NUANCE_APPLE_MOBILE)
     option(NUANCE_ARM64_JIT "Build the Arm64 JIT backend" ON)
+    option(NUANCE_PERF_COUNTERS "Build in the speed-measurement counters (docs/speed-stage0-results.md)" OFF)
 else()
     set(NUANCE_ARM64_JIT OFF)
 endif()
@@ -292,6 +293,7 @@ target_compile_definitions(${NUANCE_TARGET} PRIVATE
     _LARGEFILE64_SOURCE
     $<$<BOOL:${NUANCE_X86_64}>:USE_ASMJIT>
     $<$<BOOL:${NUANCE_ARM64_JIT}>:USE_A64_JIT>
+    $<$<BOOL:${NUANCE_PERF_COUNTERS}>:NUANCE_PERF_COUNTERS=1>
     # Tells the sources they are building against OpenGL ES: no loader, no
     # fixed-function matrix stack, and a GLES2 hardware context to ask for.
     $<$<BOOL:${NUANCE_GLES}>:NUANCE_GLES>

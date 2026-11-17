@@ -128,8 +128,16 @@ int main(int argc, char **argv)
         else next = now; // fell behind: do not try to catch up
     }
     fprintf(stderr, "perf_host: %lu frames in %.1f s\n", frames, seconds);
-    retro_unload_game();
-    // No retro_deinit and no dlclose: the process is about to end, and the
-    // core's own shutdown expects a graphics context it was never given.
+    // The game's own frame count (VidSync calls), when the core exports it: the
+    // frame rate of a run without NUANCE_PERF, to the frame.
+    {
+        const unsigned *gameFrames = (const unsigned *)dlsym(core, "perfVidSyncTotal");
+        if (gameFrames) fprintf(stderr, "perf_host: game frames %u\n", *gameFrames);
+    }
+    // No retro_unload_game, retro_deinit or dlclose: the process is about to
+    // end, and the core's own shutdown expects a graphics context it was never
+    // given. Unloading crashed in VideoCleanup on every run (glIsList with no
+    // context), leaving a crash report behind each time.
+    fflush(stderr);
     return 0;
 }

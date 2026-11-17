@@ -48,8 +48,10 @@
 extern unsigned perfVidSyncCalls, perfVidChangeBaseCalls, perfVidSyncFields; // video.cpp
 static uint64_t perfAudioFrames = 0;
 static std::atomic<uint64_t> perfMpeTime[4]; // samples by whose turn it was, sleep left out
-static std::atomic<uint64_t> perfState[4]; // samples of a64DebugBlockRunning: 0 dispatcher, 1 generated code, 2 interpreter, 3 asleep
+static std::atomic<uint64_t> perfState[16]; // samples of a64DebugBlockRunning, by state (A64State in a64_emit.h): 0 dispatcher proper, 1 generated code, 2 interpreter, 3 asleep, then the finer states of the rest
 static uint64 perf_packets[4] = {}; // packets executed per MPE since the last NUANCE_PERF report
+extern unsigned perfVidSyncTotal; // video.cpp: the game's VidSync calls since the game began
+static unsigned perfFramesAtLastReport = 0;
 
 // Emulation thread state (see "Emulation thread" below).
 static std::thread emuThread;
@@ -1039,6 +1041,10 @@ static void RunEmulation(const bool bThreaded)
     // to the MPEs that are behind. NUANCE_MPE_HZ=<packets per second>
     // changes the rate; 0 removes the limit.
     static const int64_t mpeHz = getenv("NUANCE_MPE_HZ") ? atoll(getenv("NUANCE_MPE_HZ")) : 54000000;
+#ifdef USE_A64_JIT
+    // NUANCE_PERF: round counters and the round-level sampler state (the flag is set from retro_run before this runs).
+    const bool bPerfOn = A64_COUNTING;
+#endif
     while (bRun && (bThreaded ? (!emuMainWants.load(std::memory_order_relaxed) && !emuThreadStop.load(std::memory_order_relaxed)) : !nuonEnv.trigger_render_video))
     {
         cycles++;
@@ -1070,6 +1076,14 @@ static void RunEmulation(const bool bThreaded)
         // keep their allowance, so "all out of allowance" was not test enough:
         // a quarter of the thread's time went on empty rounds.)
         const bool bIdleRound = mpeHz && packetsThisRound == 0;
+#ifdef USE_A64_JIT
+        if (bPerfOn) {
+            a64PerfRounds++;
+            if (packetsThisRound == 0) a64PerfEmptyRounds++;
+            if (bIdleRound) a64PerfIdleRounds++;
+            a64DebugBlockRunning = A64STATE_ROUND;
+        }
+#endif
 
         if (nuonEnv.pendingCommRequests)
             DoCommBusController();
@@ -1079,7 +1093,7 @@ static void RunEmulation(const bool bThreaded)
             if (bIdleRound && bThreaded) {
                 a64DebugBlockRunning = 3; // asleep, for the time split in the NUANCE_PERF report
                 usleep(50);
-                a64DebugBlockRunning = 0;
+                a64DebugBlockRunning = bPerfOn ? 7u : 0u; // back to round level
             }
             const uint64 new_time = useconds_since_start();
             {
@@ -1169,6 +1183,61 @@ static void RunEmulation(const bool bThreaded)
     }
 }
 
+#ifdef USE_A64_JIT
+// NUANCE_PERF report of the Stage 0 counters (a64_emit.h). A64PerfTake copies
+// one MPE's counters into a flat array of A64PerfNumbers values; the report is
+// made from the difference between two copies. Not everything is counted: the
+// number of turns is the sum of the end reasons, the native turns are those
+// that ended in one of the native ways, and the chain steps are the blocks
+// entered (counted since before this stage) less the native turns.
+enum { A64PerfNumbers = 3 + A64END_COUNT + A64NOBLOCK_COUNT + A64INT_COUNT + 7 + 4 + 2 + 1 };
+static void A64PerfTake(const int i, unsigned long long *v)
+{
+    unsigned k = 0;
+    v[k++] = a64PerfPackets[i]; v[k++] = a64PerfPolling[i]; v[k++] = a64PerfNativeBlocks[i];
+    for (unsigned j = 0; j < A64END_COUNT; j++) v[k++] = a64PerfTurnEnd[i][j];
+    for (unsigned j = 0; j < A64NOBLOCK_COUNT; j++) v[k++] = a64PerfNoBlock[i][j];
+    for (unsigned j = 0; j < A64INT_COUNT; j++) v[k++] = a64PerfIntReason[i][j];
+    for (unsigned j = 0; j < 7; j++) v[k++] = a64PerfPacketsPerTurn[i][j];
+    for (unsigned j = 0; j < 4; j++) v[k++] = a64PerfFlushEvents[i][j];
+    v[k++] = a64PerfFlushCalls[i]; v[k++] = a64PerfFlushAddresses[i];
+    v[k++] = a64PerfRounds;
+}
+static void A64PerfReport(const int i, const unsigned long long *d, const double secs)
+{
+    const unsigned long long *end = d + 3, *noBlock = end + A64END_COUNT, *why = noBlock + A64NOBLOCK_COUNT, *hist = why + A64INT_COUNT, *fl = hist + 7;
+    const unsigned long long rounds = fl[6];
+    unsigned long long endSum = 0, nativeTurns = 0, histSum = 0;
+    for (unsigned j = 0; j < A64END_COUNT; j++) endSum += end[j];
+    for (unsigned j = A64END_BUDGET; j < A64END_COUNT; j++) nativeTurns += end[j];
+    for (unsigned j = 0; j < 7; j++) histSum += hist[j];
+    const double turns = (double)endSum, steps = (double)d[2] - (double)nativeTurns, packets = (double)d[0];
+    const double running = turns - end[A64END_NOT_RUNNING];
+    const double interpreted = (double)end[A64END_INTERPRETED];
+    // Packets run natively: all packets less those interpreted and the BIOS and PE handler calls (each counts one).
+    const double nativePackets = packets - interpreted - (double)end[A64END_BIOS] - (double)end[A64END_PE];
+    log_printf("libretro: perf: MPE%d turns %.0f/s: %.0f not running, %.0f native, %.0f interpreted, %.0f BIOS, %.0f PE; turns not given by the round %.0f/s; chain steps %.0f/s; polling turns %.0f/s; packets %.0f/s; "
+        "%.2f packets per running turn, %.2f blocks per native turn, %.2f packets per native block\n", i,
+        turns / secs, end[A64END_NOT_RUNNING] / secs, (double)nativeTurns / secs, interpreted / secs, end[A64END_BIOS] / secs, end[A64END_PE] / secs,
+        ((double)rounds - turns) / secs, steps / secs, d[1] / secs, packets / secs,
+        running > 0 ? packets / running : 0.0, nativeTurns > 0 ? ((double)nativeTurns + steps) / nativeTurns : 0.0, (nativeTurns + steps) > 0 ? nativePackets / ((double)nativeTurns + steps) : 0.0);
+    log_printf("libretro: perf: MPE%d turns ended by, per second: not running %.0f, interpreted packet %.0f, BIOS call %.0f, PE call %.0f, IL block %.0f; native turns: budget %.0f, chain off %.0f, branch pending %.0f, halted %.0f, icache invalidate %.0f, mid-block bail %.0f, interrupt %.0f, breakpoint %.0f, local memory dirty %.0f, no block %.0f; the reasons sum to %.0f of %.0f turns\n", i,
+        end[A64END_NOT_RUNNING] / secs, end[A64END_INTERPRETED] / secs, end[A64END_BIOS] / secs, end[A64END_PE] / secs, end[A64END_IL] / secs,
+        end[A64END_BUDGET] / secs, end[A64END_NO_CHAIN] / secs, end[A64END_BRANCH_PENDING] / secs, end[A64END_HALTED] / secs, end[A64END_ICACHE_INVALIDATE] / secs,
+        end[A64END_BAIL] / secs, end[A64END_INTERRUPT] / secs, end[A64END_BREAKPOINT] / secs, end[A64END_IRAM_DIRTY] / secs, end[A64END_NO_BLOCK] / secs,
+        endSum / secs, histSum / secs);
+    log_printf("libretro: perf: MPE%d native turns that ended for lack of a block, next packet, per second: at a BIOS or PE address %.0f, never decoded %.0f, never compilable %.0f, marked compiled but no block %.0f, below the threshold %.0f, block not native %.0f\n", i,
+        noBlock[A64NOBLOCK_BIOS] / secs, noBlock[A64NOBLOCK_NEVER_DECODED] / secs, noBlock[A64NOBLOCK_NEVER_COMPILE] / secs, noBlock[A64NOBLOCK_STALE_MARK] / secs, noBlock[A64NOBLOCK_BELOW_THRESHOLD] / secs, noBlock[A64NOBLOCK_NOT_NATIVE] / secs);
+    log_printf("libretro: perf: MPE%d interpreted packets by reason, per second: delay slot of an interpreted branch %.0f, mid-block bail %.0f, newly decoded %.0f, marked compiled but no block %.0f, below the threshold %.0f; never compiled: BIOS table or breakpoint %.0f, branch packet %.0f, control register %.0f, other %.0f\n", i,
+        why[A64INT_DELAY_SLOT] / secs, why[A64INT_BAIL] / secs, why[A64INT_NEW] / secs, why[A64INT_STALE_MARK] / secs, why[A64INT_BELOW_THRESHOLD] / secs,
+        why[A64INT_NEVER_BIOS] / secs, why[A64INT_NEVER_BRANCH] / secs, why[A64INT_NEVER_CONTROL] / secs, why[A64INT_NEVER_OTHER] / secs);
+    log_printf("libretro: perf: MPE%d turns by packets run, per second: 0 %.0f, 1 %.0f, 2-3 %.0f, 4-7 %.0f, 8-15 %.0f, 16-31 %.0f, 32+ %.0f\n", i,
+        hist[0] / secs, hist[1] / secs, hist[2] / secs, hist[3] / secs, hist[4] / secs, hist[5] / secs, hist[6] / secs);
+    log_printf("libretro: perf: MPE%d native cache flushes, per second: overlay region %.1f, main and system bus ranges %.1f, whole cache (past threshold) %.1f, whole cache (no room) %.1f; FlushRegion calls %.1f, addresses walked %.0f\n", i,
+        fl[0] / secs, fl[1] / secs, fl[2] / secs, fl[3] / secs, fl[4] / secs, fl[5] / secs);
+}
+#endif
+
 // --- Emulation thread ---
 //
 // RetroArch calls retro_run once per display frame and then waits for the
@@ -1191,7 +1260,7 @@ static void EmuThreadMain()
             for (;;) {
                 usleep(100);
                 if (!emuParked.load(std::memory_order_relaxed)) {
-                    const unsigned state = a64DebugBlockRunning & 3;
+                    const unsigned state = a64DebugBlockRunning & 15;
                     perfState[state]++;
                     if (state != 3) perfMpeTime[a64DebugBlockMpe & 3]++;
                 }
@@ -1421,16 +1490,25 @@ void retro_run(void)
                 // thousand times a second at what the thread says it is doing. This
                 // is the only breakdown to trust; a profiler cannot unwind out of
                 // generated code and charges much of it to the dispatcher.
-                const uint64_t n = perfState[0] + perfState[1] + perfState[2] + perfState[3];
-                if (n)
+                uint64_t st[16], n = 0;
+                for (int k = 0; k < 16; k++) { st[k] = perfState[k]; n += st[k]; }
+                // "Dispatcher and the rest" is every state but generated code, interpreter and sleep, as before.
+                const uint64_t rest = n - st[1] - st[2] - st[3];
+                if (n) {
                     log_printf("libretro: perf: emulation thread: %.0f%% generated code, %.0f%% interpreter, %.0f%% dispatcher and the rest, %.0f%% asleep\n",
-                        100.0 * perfState[1] / n, 100.0 * perfState[2] / n, 100.0 * perfState[0] / n, 100.0 * perfState[3] / n);
+                        100.0 * st[1] / n, 100.0 * st[2] / n, 100.0 * rest / n, 100.0 * st[3] / n);
+                    // The same, with the rest taken apart (state numbers are A64State in a64_emit.h); percentages of all samples.
+                    if (NUANCE_PERF_COUNTERS)
+                        log_printf("libretro: perf: emulation thread, finer: %llu samples; generated code %.2f%%, interpreter %.2f%%, asleep %.2f%%, dispatcher proper %.2f%%, BIOS and PE handlers %.2f%%, compiling %.2f%%, chain loop between blocks %.2f%%, round level %.2f%%, cache flush loops %.2f%%, overlay hashing %.2f%%, packet decode %.2f%%, media tick and loop between turns %.2f%%, NUANCE_PERF counting %.2f%%\n",
+                        (unsigned long long)n, 100.0 * st[1] / n, 100.0 * st[2] / n, 100.0 * st[3] / n, 100.0 * st[0] / n, 100.0 * st[4] / n, 100.0 * st[5] / n,
+                        100.0 * st[6] / n, 100.0 * st[7] / n, 100.0 * st[8] / n, 100.0 * st[9] / n, 100.0 * st[10] / n, 100.0 * st[11] / n, 100.0 * st[12] / n);
+                }
                 const uint64_t busy = perfMpeTime[0] + perfMpeTime[1] + perfMpeTime[2] + perfMpeTime[3];
                 if (busy)
                     log_printf("libretro: perf: of its busy time: MPE0 %.0f%%, MPE1 %.0f%%, MPE2 %.0f%%, MPE3 %.0f%%\n",
                         100.0 * perfMpeTime[0] / busy, 100.0 * perfMpeTime[1] / busy, 100.0 * perfMpeTime[2] / busy, 100.0 * perfMpeTime[3] / busy);
                 perfMpeTime[0] = perfMpeTime[1] = perfMpeTime[2] = perfMpeTime[3] = 0;
-                perfState[0] = perfState[1] = perfState[2] = perfState[3] = 0;
+                for (int k = 0; k < 16; k++) perfState[k] = 0;
             }
             log_printf("libretro: perf: audio %.0f frames/s delivered, %.0f needed for continuous sound\n", perfAudioFrames / secs, (double)nuonEnv.nuonAudioPlaybackRate);
             perfAudioFrames = 0;
@@ -1452,9 +1530,17 @@ void retro_run(void)
                 }
             }
             for (int i = 0; i < 4; i++) {
+                // The Stage 0 counters are read as they stand and the difference from the last
+                // report is taken, so the emulation thread's increments are never overwritten from
+                // here. (a64PerfNativeBlocks is one of them: it is no longer reset below.)
+                static unsigned long long last[4][A64PerfNumbers];
+                unsigned long long now_[A64PerfNumbers], d[A64PerfNumbers];
+                A64PerfTake(i, now_);
+                for (unsigned k = 0; k < A64PerfNumbers; k++) { d[k] = now_[k] - last[i][k]; last[i][k] = now_[k]; }
+                const unsigned long long blocksDelta = d[2];
                 log_printf("libretro: perf: MPE%d per second: %.0f native blocks (%.1f packets each), %.0f packets interpreted, %.0f of them never compilable\n", i,
-                    a64PerfNativeBlocks[i] / secs,
-                    a64PerfNativeBlocks[i] ? (double)(perf_packets[i] - a64PerfInterpreted[i]) / a64PerfNativeBlocks[i] : 0.0,
+                    blocksDelta / secs,
+                    blocksDelta ? (double)(perf_packets[i] - a64PerfInterpreted[i]) / blocksDelta : 0.0,
                     a64PerfInterpreted[i] / secs, a64PerfNeverCompile[i] / secs);
                 log_printf("libretro: perf: MPE%d compilable but interpreted, per second: %.0f in a delay slot, %.0f newly decoded, %.0f compiled for another overlay, %.0f below the threshold\n", i,
                     a64PerfWhy[i][0] / secs, a64PerfWhy[i][1] / secs, a64PerfWhy[i][2] / secs, a64PerfWhy[i][3] / secs);
@@ -1466,7 +1552,17 @@ void retro_run(void)
                     lastFind[i] = m.a64OverlayLookups; lastNative[i] = m.numNativeCodeCacheFlushes; lastInterp[i] = m.numInterpreterCacheFlushes;
                 }
                 a64PerfWhy[i][0] = a64PerfWhy[i][1] = a64PerfWhy[i][2] = a64PerfWhy[i][3] = 0;
-                a64PerfNativeBlocks[i] = a64PerfInterpreted[i] = a64PerfNeverCompile[i] = 0;
+                if (NUANCE_PERF_COUNTERS) A64PerfReport(i, d, secs);
+                a64PerfInterpreted[i] = a64PerfNeverCompile[i] = 0;
+            }
+            {
+                static unsigned long long lastRounds, lastEmpty, lastIdle;
+                if (NUANCE_PERF_COUNTERS)
+                    log_printf("libretro: perf: window %.3f s, game frames %u to %u; rounds %.0f/s, %.0f/s with no packet run, %.0f/s slept as idle\n",
+                    secs, perfFramesAtLastReport, perfVidSyncTotal,
+                    (a64PerfRounds - lastRounds) / secs, (a64PerfEmptyRounds - lastEmpty) / secs, (a64PerfIdleRounds - lastIdle) / secs);
+                lastRounds = a64PerfRounds; lastEmpty = a64PerfEmptyRounds; lastIdle = a64PerfIdleRounds;
+                perfFramesAtLastReport = perfVidSyncTotal;
             }
         }
 #endif
@@ -1495,7 +1591,7 @@ void retro_run(void)
                     // both times is a block that does not return.
                     for (int look = 0; look < 2; look++) {
                         log_printf("libretro: Arm64 JIT watchdog: no frame for 5 s; %s native block MPE%u at %08X; pcexec %08X %08X %08X %08X\n",
-                            a64DebugBlockRunning ? "inside" : "last",
+                            a64DebugBlockRunning == 1 ? "inside" : "last", // state 1: inside generated code
                             (unsigned)a64DebugBlockMpe, (unsigned)a64DebugBlockPc,
                             nuonEnv.mpe[0].pcexec, nuonEnv.mpe[1].pcexec, nuonEnv.mpe[2].pcexec, nuonEnv.mpe[3].pcexec);
                         usleep(200000);

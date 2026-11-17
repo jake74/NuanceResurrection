@@ -1849,11 +1849,25 @@ void MPE::UpdateInvalidateRegion(const uint32 start, const uint32 length)
   if(end > interpreterInvalidateRegionEnd) interpreterInvalidateRegionEnd = end;
 }
 
+#ifdef USE_A64_JIT
+// NUANCE_PERF: one FlushRegion call and the number of addresses its loop walks.
+#define A64_PERF_FLUSH_REGION(first, last) do { const uint32 a64FlushFirst = (first), a64FlushLast = (last); if(a64FlushLast >= a64FlushFirst) { a64PerfFlushCalls[mpeIndex & 3]++; a64PerfFlushAddresses[mpeIndex & 3] += (unsigned long long)a64FlushLast - a64FlushFirst + 1; } } while(0)
+#endif
+
 bool MPE::FetchDecodeExecute()
 {
   cycleCounter = 0;
 #ifdef USE_A64_JIT
   a64DebugBlockMpe = mpeIndex; // whose turn it is, for the time split in the NUANCE_PERF report
+  // and that this turn's own work is the dispatcher's, until a block, the
+  // interpreter or a handler says otherwise. Only for the sampler: a store to a
+  // volatile on every turn is a cost worth not paying when nothing reads it.
+  if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+  // NUANCE_PERF counters (a64_emit.h). The paths of a turn leave why it ended,
+  // and a few addresses to classify it by, in these locals by plain
+  // assignment; one test of the flag at the end of the turn counts them.
+  unsigned a64EndReason = A64END_NOT_RUNNING;
+  uint32 a64TurnStartPc = 0, a64EndLookup = 0;
 #endif
   if(mpectl & MPECTRL_MPEGO)
   {
@@ -1863,6 +1877,9 @@ bool MPE::FetchDecodeExecute()
 
     // Force 16 bit alignment of pcexec
     pcexec &= ~0x01U;
+#ifdef USE_A64_JIT
+    a64TurnStartPc = pcexec;
+#endif
 
     // Check for interrupts and update pcexec, rzi1 and rzi2 if an interrupt is to be serviced
 
@@ -1934,8 +1951,14 @@ bool MPE::FetchDecodeExecute()
         //pcexec is within MPE IRAM region that has been modified since the last time it was hashed
 
         bool bInvalidateOverlayRegion; // and also get the new overlay mask
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_OVERLAY;
+#endif
         overlayMask = overlayManager.FindOverlay(bInvalidateOverlayRegion);
         a64OverlayLookups++;
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_FLUSH;
+#endif
 
         //Invalidate the interpreter cache because these entries are not mapped to unique address ranges
 
@@ -1948,13 +1971,30 @@ bool MPE::FetchDecodeExecute()
           //The overlay manager assigned a previously used overlay ID so invalidate the code cache entries
           //associated with the overlay address range
           numNativeCodeCacheFlushes++;
+#ifdef USE_A64_JIT
+          if(A64_COUNTING)
+          {
+            a64PerfFlushEvents[mpeIndex & 3][0]++;
+            A64_PERF_FLUSH_REGION(MPE_IRAM_BASE | overlayMask, (MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex] - 1) | overlayMask);
+          }
+#endif
           nativeCodeCache.FlushRegion(MPE_IRAM_BASE | overlayMask, (MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex] - 1) | overlayMask); // always invalidate whole MPE IRAM region, as previously cached code must be erased
         }
 
         // if not only IRAM was affected, handle the leftover invalid regions
         // numNativeCodeCacheFlushes++;
+#ifdef USE_A64_JIT
+        if(A64_COUNTING)
+        {
+          A64_PERF_FLUSH_REGION(invalidateRegionStart, MPE_IRAM_BASE - 1);
+          A64_PERF_FLUSH_REGION(MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex], invalidateRegionEnd);
+        }
+#endif
         nativeCodeCache.FlushRegion(invalidateRegionStart, MPE_IRAM_BASE - 1);
         nativeCodeCache.FlushRegion(MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex], invalidateRegionEnd);
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
 
         //Reset/Invalidate the IRAM invalidation indicators
         invalidateRegionStart = 0xFFFFFFFFU;
@@ -1971,13 +2011,27 @@ bool MPE::FetchDecodeExecute()
       if(bInvalidateInstructionCaches)
       {
         bInvalidateInstructionCaches = false;
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_FLUSH;
+#endif
         InvalidateICache();
         if((mpeIndex == 0) || (mpeIndex == 3))
         {
           numNativeCodeCacheFlushes++;
+#ifdef USE_A64_JIT
+          if(A64_COUNTING)
+          {
+            a64PerfFlushEvents[mpeIndex & 3][1]++;
+            A64_PERF_FLUSH_REGION(MAIN_BUS_BASE, MAIN_BUS_BASE + MAIN_BUS_SIZE - 1);
+            A64_PERF_FLUSH_REGION(SYSTEM_BUS_BASE, SYSTEM_BUS_BASE + SYSTEM_BUS_SIZE - 1);
+          }
+#endif
           nativeCodeCache.FlushRegion(MAIN_BUS_BASE, MAIN_BUS_BASE + MAIN_BUS_SIZE - 1);
           nativeCodeCache.FlushRegion(SYSTEM_BUS_BASE, SYSTEM_BUS_BASE + SYSTEM_BUS_SIZE - 1);
         }
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
       }
     }
 
@@ -1998,7 +2052,13 @@ bool MPE::FetchDecodeExecute()
       else if(bInvalidateInterpreterCache)
       {
         numInterpreterCacheFlushes++;
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_FLUSH;
+#endif
         instructionCache->InvalidateRegion(interpreterInvalidateRegionStart, interpreterInvalidateRegionEnd);
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
         bInvalidateInterpreterCache = false;
         interpreterInvalidateRegionStart = 0xFFFFFFFFU;
         interpreterInvalidateRegionEnd = 0x00000000;
@@ -2028,12 +2088,25 @@ bool MPE::FetchDecodeExecute()
           if(nativeCodeCache.IsBeyondThreshold())
           {
             numNativeCodeCacheFlushes++;
+#ifdef USE_A64_JIT
+            if(A64_COUNTING)
+            {
+              a64PerfFlushEvents[mpeIndex & 3][2]++;
+              a64DebugBlockRunning = A64STATE_FLUSH;
+            }
+#endif
             nativeCodeCache.Flush();
             instructionCache->ClearCompiledStates();
           }
 
           bool bError;
+#ifdef USE_A64_JIT
+          if(A64_COUNTING) a64DebugBlockRunning = A64STATE_COMPILE;
+#endif
           nativeCodeCacheEntryPoint = superBlock.CompileBlock(pcexecLookupValue, nativeCodeCache, bError);
+#ifdef USE_A64_JIT
+          if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
           if(!bError)
           {
             pNativeCodeCacheEntry = nativeCodeCache.pageMap.FindEntry(pcexecLookupValue);
@@ -2061,8 +2134,18 @@ bool MPE::FetchDecodeExecute()
             else if(nativeCodeCacheEntryPoint == 0)
             {
               numNativeCodeCacheFlushes++;
+#ifdef USE_A64_JIT
+              if(A64_COUNTING)
+              {
+                a64PerfFlushEvents[mpeIndex & 3][3]++;
+                a64DebugBlockRunning = A64STATE_FLUSH;
+              }
+#endif
               nativeCodeCache.Flush();
               instructionCache->ClearCompiledStates();
+#ifdef USE_A64_JIT
+              if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
             }
 
             nativeCodeCacheEntryPoint = 0;
@@ -2088,7 +2171,13 @@ bool MPE::FetchDecodeExecute()
       pInstructionCacheEntry->frequencyCount = 1;
       if(pcexec < ROM_BIOS_BASE)
       {
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DECODE;
+#endif
         DecompressPacket(GetPointerToMemoryBank(pcexec),*pInstructionCacheEntry,DECOMPRESS_OPTIONS_SCHEDULE_ECU_LAST);
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
         if(((pcexec >= BIOS_JUMPTABLE_START) && (pcexec <= BIOS_JUMPTABLE_END)) || (pInstructionCacheEntry->packetInfo & PACKETINFO_BREAKPOINT))
         {
           pInstructionCacheEntry->packetInfo |= PACKETINFO_NEVERCOMPILE;
@@ -2129,6 +2218,9 @@ bool MPE::FetchDecodeExecute()
       //prevPcexec = pcexec;
       if((pNativeCodeCacheEntry->compileType == SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_BLOCK) || (pNativeCodeCacheEntry->compileType == SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_SINGLE))
       {
+#ifdef USE_A64_JIT
+        a64EndReason = A64END_IL;
+#endif
         const uint32 nInstructions = pNativeCodeCacheEntry->numInstructions;
         const Nuance* pNuance = (Nuance *)nativeCodeCacheEntryPoint;
         bInterpretedBranchTaken = false;
@@ -2162,10 +2254,13 @@ bool MPE::FetchDecodeExecute()
           a64DebugBlockMpe = mpeIndex;
           a64DebugBlockRunning = 1;
           a64PerfNativeBlocks[mpeIndex & 3]++;
+          a64EndReason = A64END_BUDGET; // unless the chain loop below says otherwise
 #endif
           nativeCodeCacheEntryPoint();
 #ifdef USE_A64_JIT
-          a64DebugBlockRunning = 0;
+          // The chain loop below is a sampler state of its own (the call of each
+          // block and the block are state 1); back to 0 when it is over.
+          a64DebugBlockRunning = A64STATE_CHAIN;
 
           // Chaining: when the block that follows is already compiled, run it
           // from here instead of going back out through the scheduler and in
@@ -2185,22 +2280,34 @@ bool MPE::FetchDecodeExecute()
               {
                 // A taken branch: native blocks leave exactly one step to resolve it.
                 if(ecuSkipCounter != 1)
+                {
+                  a64EndReason = A64END_BRANCH_PENDING;
                   break;
+                }
                 ecuSkipCounter = 0;
                 pcexec = pcfetchnext;
               }
 
               if(!(mpectl & MPECTRL_MPEGO) || (excephalten & excepsrc) || bInvalidateInstructionCaches || interpretNextPacket)
+              {
+                a64EndReason = (!(mpectl & MPECTRL_MPEGO) || (excephalten & excepsrc)) ? A64END_HALTED : bInvalidateInstructionCaches ? A64END_ICACHE_INVALIDATE : A64END_BAIL;
                 break;
+              }
               if(intsrc && ((intctl & (1U << 5)) == 0))
               {
                 if(intsrc & (1U << inten2sel))
                 {
                   if((intctl & (1U << 7)) == 0)
+                  {
+                    a64EndReason = A64END_INTERRUPT;
                     break;
+                  }
                 }
                 else if(((intctl & ((1U << 3) | (1U << 1))) == 0) && (intsrc & inten1))
+                {
+                  a64EndReason = A64END_INTERRUPT;
                   break;
+                }
               }
 
               // (pcexec itself is only touched once the next block is known to
@@ -2208,18 +2315,28 @@ bool MPE::FetchDecodeExecute()
               // scheduler would have found without chaining.)
               const uint32 nextPc = pcexec & ~0x01U;
               if(nextPc == breakpointAddress)
+              {
+                a64EndReason = A64END_BREAKPOINT;
                 break;
+              }
               uint32 lookup = nextPc;
               if((nextPc < (MPE_IRAM_BASE + MPE::overlayLengths[mpeIndex])) && (nextPc >= MPE_IRAM_BASE))
               {
                 if((nextPc <= invalidateRegionEnd) && (nextPc >= invalidateRegionStart))
+                {
+                  a64EndReason = A64END_IRAM_DIRTY;
                   break;
+                }
                 lookup |= overlayMask;
               }
 
               const NativeCodeCacheEntry * const pNext = nativeCodeCache.pageMap.FindEntry(lookup);
               if(!pNext || (pNext->virtualAddress != lookup) || (pNext->compileType != SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_NATIVE_CODE_BLOCK))
+              {
+                a64EndReason = A64END_NO_BLOCK;
+                a64EndLookup = lookup; // the end of the turn looks at what is there, if NUANCE_PERF is on
                 break;
+              }
 
               pcexec = nextPc;
               cycleCounter += pNext->numPackets;
@@ -2228,9 +2345,12 @@ bool MPE::FetchDecodeExecute()
               a64DebugBlockRunning = 1;
               a64PerfNativeBlocks[mpeIndex & 3]++;
               pNext->entryPoint();
-              a64DebugBlockRunning = 0;
+              a64DebugBlockRunning = A64STATE_CHAIN;
             }
           }
+          else
+            a64EndReason = A64END_NO_CHAIN;
+          if(A64_COUNTING) a64DebugBlockRunning = 0;
 #endif
           //blockExecuteCount--;
         }
@@ -2248,6 +2368,21 @@ bool MPE::FetchDecodeExecute()
           a64PerfNeverCompile[mpeIndex & 3]++;
         else
           a64PerfWhy[mpeIndex & 3][only_find_icache_entry ? 0 : a64FreshDecode ? 1 : (pInstructionCacheEntry->packetInfo & PACKETINFO_COMPILED) ? 2 : 3]++;
+        a64EndReason = A64END_INTERPRETED;
+        if(A64_COUNTING)
+        {
+          const uint32 info = pInstructionCacheEntry->packetInfo;
+          unsigned why;
+          if(info & PACKETINFO_NEVERCOMPILE)
+            why = (((pcexec >= BIOS_JUMPTABLE_START) && (pcexec <= BIOS_JUMPTABLE_END)) || (info & PACKETINFO_BREAKPOINT)) ? A64INT_NEVER_BIOS
+                : (info & (PACKETINFO_BRANCH_ALWAYS | PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_NOP)) ? A64INT_NEVER_BRANCH
+                : (info & PACKETINFO_MEMORY_IO) ? A64INT_NEVER_CONTROL : A64INT_NEVER_OTHER;
+          else if(only_find_icache_entry)
+            why = ecuSkipCounter ? A64INT_DELAY_SLOT : A64INT_BAIL; // interpretNextPacket has been cleared by now
+          else
+            why = a64FreshDecode ? A64INT_NEW : (info & PACKETINFO_COMPILED) ? A64INT_STALE_MARK : A64INT_BELOW_THRESHOLD;
+          a64PerfIntReason[mpeIndex & 3][why]++;
+        }
         // One in sixteen, so that looking does not slow down what is being looked at.
         if(a64PerfSampleInterpreted && ((a64PerfInterpreted[mpeIndex & 3] & 15) == 0))
           A64_NoteInterpretedPacket(mpeIndex, pcexec, pInstructionCacheEntry->packetInfo);
@@ -2268,7 +2403,14 @@ bool MPE::FetchDecodeExecute()
       {
         cycleCounter++;
         //Execute BIOS function: force to one of 256 entries
+#ifdef USE_A64_JIT
+        a64EndReason = A64END_BIOS;
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_HANDLER;
+#endif
         BiosJumpTable[(pcexec >> 1) & 0xFF](*this);
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
 
         if(!bCallingMediaCallback)
         {
@@ -2280,7 +2422,14 @@ bool MPE::FetchDecodeExecute()
       {
         //Execute PE function
         cycleCounter++;
+#ifdef USE_A64_JIT
+        a64EndReason = A64END_PE;
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_HANDLER;
+#endif
         CallPEHandler(*this, pcexec);
+#ifdef USE_A64_JIT
+        if(A64_COUNTING) a64DebugBlockRunning = A64STATE_DISPATCH;
+#endif
         if(!bCallingMediaCallback)
         {
           //Perform an implicit RTS, nop
@@ -2329,6 +2478,41 @@ bool MPE::FetchDecodeExecute()
       }
     }
 
+#ifdef USE_A64_JIT
+    // NUANCE_PERF: the one test per running turn. Everything the turn's paths
+    // left in a64EndReason and the locals is counted here.
+    if(A64_COUNTING)
+    {
+      a64DebugBlockRunning = A64STATE_COUNTING; // the sampler: the cost of this counting is its own state
+      const unsigned m = mpeIndex & 3;
+      a64PerfTurnEnd[m][a64EndReason]++;
+      a64PerfPackets[m] += cycleCounter;
+      a64PerfPacketsPerTurn[m][cycleCounter < 2 ? cycleCounter : (31 - __builtin_clz(cycleCounter) + 1 > 6 ? 6 : 31 - __builtin_clz(cycleCounter) + 1)]++;
+      if(a64TurnStartPc == a64PerfLastTurnPc[m])
+        a64PerfPolling[m]++;
+      a64PerfLastTurnPc[m] = a64TurnStartPc;
+      if(a64EndReason == A64END_NO_BLOCK)
+      {
+        // What the next packet is, by a look in the caches (nothing is changed by looking).
+        const uint32 nextPc = pcexec & ~0x01U; // not yet changed when no block was found
+        const NativeCodeCacheEntry * const pThere = nativeCodeCache.pageMap.FindEntry(a64EndLookup);
+        unsigned why = A64NOBLOCK_NOT_NATIVE;
+        if(!(pThere && pThere->virtualAddress == a64EndLookup))
+        {
+          bool bNextValid;
+          const InstructionCacheEntry * const pNextPacket = instructionCache->FindInstructionCacheEntry(nextPc, bNextValid);
+          if(nextPc >= ROM_BIOS_BASE || (nextPc >= BIOS_JUMPTABLE_START && nextPc <= BIOS_JUMPTABLE_END)) why = A64NOBLOCK_BIOS;
+          else if(!bNextValid || pNextPacket->pcexec != nextPc) why = A64NOBLOCK_NEVER_DECODED;
+          else if(pNextPacket->packetInfo & PACKETINFO_NEVERCOMPILE) why = A64NOBLOCK_NEVER_COMPILE;
+          else if(pNextPacket->packetInfo & PACKETINFO_COMPILED) why = A64NOBLOCK_STALE_MARK;
+          else why = A64NOBLOCK_BELOW_THRESHOLD;
+        }
+        a64PerfNoBlock[m][why]++;
+      }
+      a64DebugBlockRunning = A64STATE_MEDIA; // the sampler: the media tick and the rest of the turn
+    }
+#endif
+
     // Drain any (delayed) media callbacks. Done HERE - after the
     // ecuSkipCounter delay-slot resolution, as that
     // block can overwrite pcexec with pcfetchnext when a pending branch
@@ -2352,6 +2536,13 @@ bool MPE::FetchDecodeExecute()
 
   //StopPerformanceTimer();
   //timeDelta = GetTimeDeltaMs();
+#ifdef USE_A64_JIT
+  if(A64_COUNTING)
+  {
+    a64PerfTurnEnd[mpeIndex & 3][A64END_NOT_RUNNING]++;
+    a64PerfPacketsPerTurn[mpeIndex & 3][0]++;
+  }
+#endif
   return false;
 }
 

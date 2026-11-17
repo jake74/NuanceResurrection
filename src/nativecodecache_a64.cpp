@@ -38,6 +38,7 @@
 #include <windows.h>
 #include "mpe.h"
 #include "NativeCodeCache.h"
+#include <chrono>
 #include <asmjit/arm/armutils.h>
 
 using namespace asmjit;
@@ -1800,6 +1801,10 @@ volatile unsigned a64DebugBlockMpe = 0;
 volatile unsigned a64DebugBlockRunning = 0;
 unsigned a64ChainPackets = 32;
 unsigned long long a64PerfNativeBlocks[4], a64PerfInterpreted[4], a64PerfNeverCompile[4], a64PerfWhy[4][4];
+unsigned long long a64PerfTurnEnd[4][A64END_COUNT], a64PerfPackets[4], a64PerfPolling[4], a64PerfNoBlock[4][A64NOBLOCK_COUNT], a64PerfIntReason[4][A64INT_COUNT], a64PerfPacketsPerTurn[4][7];
+unsigned long long a64PerfFlushEvents[4][4], a64PerfFlushCalls[4], a64PerfFlushAddresses[4];
+unsigned long long a64PerfRounds, a64PerfEmptyRounds, a64PerfIdleRounds;
+unsigned a64PerfLastTurnPc[4];
 unsigned a64IramThreshold = 3, a64RecompileMarked = 0, a64CompileSlotBranches = 1;
 
 // --- Which packets the interpreter still runs ---
@@ -1976,6 +1981,53 @@ bool A64_JitSelfTest(char * const message, const size_t messageSize)
   {
     snprintf(message, messageSize, "empty block failed (%s, wrote %08X)", cache.A64_FailReason() ? cache.A64_FailReason() : "ran", (unsigned)out);
     return false;
+  }
+
+  // NUANCE_A64_E4=<calls>: how long a call of a block of the shape the compiler
+  // emits takes, from a loop in C++ (docs/speed-plan.md section 3.2, E4):
+  // an empty C++ function for the loop's own cost; a block with the prologue,
+  // the two register-file pointers, one absolute store and the epilogue (the
+  // block of test 1); and the same with two more absolute stores, as a block
+  // ending in a branch has (pcexec and pcfetchnext). Logged, nothing else.
+  if(const char * const e4 = getenv("NUANCE_A64_E4"))
+  {
+    const unsigned long long calls = strtoull(e4, 0, 10);
+    auto timeCalls = [&](void (*fn)()) {
+      const auto t0 = std::chrono::steady_clock::now();
+      for(unsigned long long i = 0; i < calls; i++)
+        fn();
+      return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1e9 / (double)(calls ? calls : 1);
+    };
+    double ns[3] = {0, 0, 0};
+    static void (* volatile emptyCall)() = []() {};
+    ns[0] = timeCalls(emptyCall);
+    for(int variant = 0; variant < 2; variant++)
+    {
+      uint8 * const entry = cache.GetEmitPointer();
+      cache.A64_BeginBlock();
+      cache.X86Emit_PUSHAD();
+      cache.X86Emit_MOVIR_Ptr(cellsAddr, x86Reg::x86Reg_esi);
+      cache.X86Emit_MOVIR_Ptr(cellsAddr, x86Reg::x86Reg_edi);
+      cache.X86Emit_MOVIM((int32)0x80001234, x86MemPtr::x86MemPtr_dword, outAddr);
+      if(variant == 1)
+      {
+        cache.X86Emit_MOVIM((int32)0x80001236, x86MemPtr::x86MemPtr_dword, outAddr);
+        cache.X86Emit_MOVIM((int32)0x80001238, x86MemPtr::x86MemPtr_dword, outAddr);
+      }
+      cache.X86Emit_POPAD();
+      cache.X86Emit_RETN();
+      uint32 size;
+      {
+        const NativeCodeCache::WriteScope writeScope(cache);
+        size = cache.A64_EndBlock();
+      }
+      if(!size)
+        break;
+      FlushInstructionCache(GetCurrentProcess(), entry, size);
+      ns[1 + variant] = timeCalls((void (*)())entry);
+    }
+    fprintf(stderr, "libretro: Arm64 JIT E4: %llu calls each: empty C++ function %.2f ns, block with one store %.2f ns, with three stores %.2f ns (the C++ function's cost is in all three)\n",
+      calls, ns[0], ns[1], ns[2]);
   }
 
   // 2: a call into C++ with two arguments, with the base pointer and a
