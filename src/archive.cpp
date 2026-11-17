@@ -164,9 +164,15 @@ std::string MakeTempDir()
 // Decompress a CHD-DVD into a plain ISO under tempDir using vendored libchdr
 // (third_party/libchdr/). NUON discs are single-track DVD-Video, so the CHD
 // hunks decompress straight into 2048-byte-sector ISO data that
-// ISO9660Reader opens unchanged. CD-format CHDs are intentionally not handled
-// — no NUON dumps use that format and the de-interleave step would mean
-// pulling in libchdr's CD frontend on top of the raw codec layer. Returns
+// ISO9660Reader opens unchanged.
+//
+// A CHD made with "chdman createcd" is laid out differently, and people do
+// make them that way from NUON images: every sector is a 2448-byte CD frame
+// (2352 bytes of sector, then 96 of subcode), with the 2048 bytes of data
+// either at the start of the frame (a "cooked" MODE1 track, which is what
+// createcd makes from an .iso) or after a 16-byte header (raw MODE1), or a
+// 24-byte one (raw MODE2 form 1). Those are unpacked to the same plain ISO,
+// a frame at a time; the raw kinds are recognised by their sync pattern. Returns
 // the path to the produced ISO, or "" on failure. The caller is responsible
 // for adding the path to g_tempPaths so it gets cleaned up on shutdown.
 std::string ExtractChdToIso(const char* chdPath, const std::string& tempDir)
@@ -193,6 +199,10 @@ std::string ExtractChdToIso(const char* chdPath, const std::string& tempDir)
     return std::string();
   }
 
+  // CD frames, when the unit is one and the hunks hold whole ones.
+  constexpr uint32_t kCdFrame = 2448, kSector = 2048;
+  const bool bCdFrames = hdr->unitbytes == kCdFrame && (hdr->hunkbytes % kCdFrame) == 0;
+
   std::vector<uint8_t> hunk(hdr->hunkbytes);
   uint64_t remaining = hdr->logicalbytes;
   for (uint32_t i = 0; i < hdr->hunkcount && remaining > 0; i++) {
@@ -202,6 +212,21 @@ std::string ExtractChdToIso(const char* chdPath, const std::string& tempDir)
       fclose(out);
       chd_close(chd);
       return std::string();
+    }
+    if (bCdFrames) {
+      static const uint8_t sync[12] = { 0x00,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0x00 };
+      for (uint32_t f = 0; f + kCdFrame <= hdr->hunkbytes && remaining >= kCdFrame; f += kCdFrame, remaining -= kCdFrame) {
+        const uint8_t* frame = hunk.data() + f;
+        const uint32_t dataAt = memcmp(frame, sync, sizeof(sync)) != 0 ? 0 : (frame[15] == 2 ? 24 : 16);
+        if (fwrite(frame + dataAt, 1, kSector, out) != kSector) {
+          fprintf(stderr, "Short write to %s\n", isoPath.c_str());
+          fclose(out);
+          chd_close(chd);
+          return std::string();
+        }
+      }
+      if (remaining < kCdFrame) remaining = 0;
+      continue;
     }
     // Last hunk may overshoot logicalbytes; clip to the declared size so the
     // produced ISO matches the original byte-for-byte.
@@ -217,7 +242,7 @@ std::string ExtractChdToIso(const char* chdPath, const std::string& tempDir)
 
   fclose(out);
   chd_close(chd);
-  fprintf(stderr, "Extracted CHD: %s -> %s (%llu bytes)\n",
+  fprintf(stderr, "Extracted CHD%s: %s -> %s (%llu bytes in the CHD)\n", bCdFrames ? " (CD frames)" : "",
           chdPath, isoPath.c_str(), (unsigned long long)hdr->logicalbytes);
   return isoPath;
 }
