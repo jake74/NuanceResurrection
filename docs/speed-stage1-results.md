@@ -268,3 +268,31 @@ round (game frames in 80 s, boot included):
 S1.3 is small but ahead in every comparable round; both items are kept.
 
 On the Pad: not measured. Played by hand after S1.3 and S1.1 (2026-11-18), with the frame rate counter: 28-30 in ordinary play, around 20 in heavy scenes, about 12 at worst in a very busy scene. Whether that worst case is a scene not met before or a regression is not known: the earlier notes give 18-26 for the busiest scenes, without saying which.
+
+## A busy scene on demand, on the Pad (2026-11-18)
+
+Jake pointed out what makes the game busy: the superzapper (B) and later
+levels, chosen on the level select with right. A scripted game on the Pad now
+reaches frame rates like his own play, with the app's frame counter in
+screenshots (`adb exec-out screencap`):
+
+```
+script: 60-63:start;120-123:start;250-253:a;330-333:a;450-453:a;
+        then right pressed 14 times, 6 frames each, every 20 frames from 470;
+        780-783:a (start level 7, "V SIGN": the level select stopped there);
+        880-2300:a (fire); the claw swept with x=70 and x=-70 alternately,
+        40 frames each, from 900; 1100-1104:b;1500-1504:b;1900-1904:b
+am start -n gg.dekiru.nagori3k/.MainActivity --es game '<image>' --ez perf true --es script '<script>'
+```
+
+The counter read 28-30 most of the time, 24-25 in busy moments, 20 when the
+superzapper went off, and 17 at worst, with the claw sweeping, firing and
+enemies on the web. (Jake's own worst is about 12, in a busier scene.)
+
+The Pad's time split in this game (ordinary build, `--ez perf true`):
+generated code 39-48%, interpreter 3-6%, dispatcher and the rest 43-54%,
+asleep 3-7%. On the Mac after S1.1, in the scripted busy stretch: generated
+code 74%, interpreter 4%, dispatcher 8%. On the Pad the time outside
+generated code is the larger half, so what Stage 0 found on the Mac does not
+carry over as it is: the Pad needs its own measurement with the counters
+built in.
