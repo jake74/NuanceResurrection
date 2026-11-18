@@ -630,6 +630,30 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
   for(uint32 i = 0; i < MPE_DTAGS_BASE - MPE_DTRAM_BASE; i++)
     local[i] = (uint8)rng.Next();
 
+  // A word of this memory that a load turns into a register and a store then uses as an
+  // address must not be one in the tag and control windows or beyond (MPE_DTAGS_BASE up
+  // to MAIN_BUS_BASE), which Value() keeps registers out of for the same reason. The
+  // interpreter's store to the part of the tag window above its first 64K, and its
+  // loads and stores of the control window above the registers, index the MPE's
+  // register struct from a negative or huge offset (WriteControlRegister and
+  // ReadControlRegister, "no special handling" default: *(&mpectl + (address >> 4))), which
+  // is outside the process: a crash that no program of the game's makes. The words
+  // are replaced, without drawing from the generator, by an address in the data window.
+  auto scrub = [](uint8 * const words, const uint32 bytes)
+  {
+    for(uint32 i = 0; i + 4 <= bytes; i += 4)
+    {
+      const uint32 value = ((uint32)words[i] << 24) | ((uint32)words[i+1] << 16) | ((uint32)words[i+2] << 8) | words[i+3];
+      if(value >= MPE_DTAGS_BASE && value < MAIN_BUS_BASE)
+      {
+        const uint32 safe = kDataBase + kDataMargin + ((value & 0xFFFFU) << 1);
+        words[i] = (uint8)(safe >> 24); words[i+1] = (uint8)(safe >> 16); words[i+2] = (uint8)(safe >> 8); words[i+3] = (uint8)safe;
+      }
+    }
+  };
+  scrub(data, kDataBytes);
+  scrub(local, MPE_DTAGS_BASE - MPE_DTRAM_BASE);
+
   unsigned numCompared = 0, numNotCompiled = 0, numOutside = 0, numMismatched = 0, numUndefined = 0, numLogged = 0;
   unsigned numWithMemory = 0, numWithBranch = 0, numBranchTaken = 0;
   // Runs whose first delay slot holds a ",nop" branch (the case S1.2 of docs/speed-plan.md
@@ -641,6 +665,35 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
   static const bool bGenSlot1 = !(getenv("NUANCE_A64_DIFFTEST_SLOT1") && atoi(getenv("NUANCE_A64_DIFFTEST_SLOT1")) == 0);
   Rng modeRng = { 0xD1B54A32D192ED03ULL ^ ((uint64)seed << 7) ^ 1 };
   unsigned s1Generated = 0;
+  // Runs whose delayed conditional branch has a branch in each delay slot of the
+  // kinds FetchSuperBlock compiles with run-time checks of ecuSkipCounter (S1.3 of
+  // docs/speed-plan.md and "both slots hold branches"): each slot holds a plain
+  // packet, a ",nop" branch or a delayed conditional branch (never both plain),
+  // and a delayed branch in a slot has its own delay slots in the packets after
+  // the outer branch's, which the run lays out as well. NUANCE_A64_DIFFTEST_NESTED=0
+  // leaves these runs out, which gives back the runs made before they were added
+  // (they draw from a generator of their own, modeRng2).
+  static const bool bGenNested = !(getenv("NUANCE_A64_DIFFTEST_NESTED") && atoi(getenv("NUANCE_A64_DIFFTEST_NESTED")) == 0);
+  Rng modeRng2 = { 0xA24BAED4963EE407ULL ^ ((uint64)seed << 11) ^ 1 };
+  unsigned nGenerated = 0, nAmbiguous = 0;
+  // The packets the block counted as run (MPE::cycleCounter, which the speed limit goes by)
+  // against the packets the interpreter ran, for the runs whose chain is wholly in the block.
+  unsigned nCyclesChecked = 0, nCyclesDiffer = 0, s1CyclesChecked = 0, s1CyclesDiffer = 0;
+  // Runs whose delayed branch has a register-indirect scalar load or store in one of its delay
+  // slots (S1.1 of docs/speed-plan.md), and for half of those the address register holds the
+  // address of a control register that is plain state, so that the access leaves the native
+  // block for the interpreter in the middle of the branch's delay slots (a "bail"). Compared
+  // with the interpreter running the whole run. NUANCE_A64_DIFFTEST_SLOTMEM=0 leaves these runs
+  // out (their choices come from a generator of their own, modeRng3).
+  static const bool bGenSlotMem = !(getenv("NUANCE_A64_DIFFTEST_SLOTMEM") && atoi(getenv("NUANCE_A64_DIFFTEST_SLOTMEM")) == 0);
+  Rng modeRng3 = { 0x6A09E667F3BCC909ULL ^ ((uint64)seed << 13) ^ 1 };
+  // [slot 1 or 2][address register left at random, or set to a control register's address]
+  unsigned smGenerated[2][2] = {}, smCompared[2][2] = {}, smBailed[2][2] = {}, smNotCompiled[2][2] = {}, smMismatched[2][2] = {}, smOutside[2][2] = {}, smUndefined[2][2] = {};
+  // By which branch the interpreter found taken first: 0 the outer one, 1 and 2 the
+  // ones in its delay slots, 3 the packet after them, 4 none.
+  unsigned nCompared[5] = {}, nCovered[5] = {}, nNotCompiled[5] = {}, nOutside[5] = {}, nMismatched[5] = {}, nUndefined[5] = {};
+  // By what the two slots hold (plain, ",nop" branch, delayed branch): [first][second].
+  unsigned cGenerated[3][3] = {}, cCompared[3][3] = {}, cCovered[3][3] = {}, cNotCompiled[3][3] = {}, cMismatched[3][3] = {};
   unsigned s1Compared[5] = {}, s1NotCompiled[5] = {}, s1Outside[5] = {}, s1Mismatched[5] = {}, s1Undefined[5] = {}, s1Covered[5] = {};
   std::map<std::string, unsigned> mismatchByHandler;
   constexpr uint32 kNumHandlers = Handler_PacketStart;
@@ -661,6 +714,12 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     bool bHasBranch = false, bHasMemory = false;
     bool bSlot1Branch = false;
     uint32 outerPc = 0, slot1Pc = 0, slot1Next = 0;
+    int smSlot = -1;
+    uint32 smAddrReg = 0, smSlotPc = 0;
+    bool smPoke = false;
+    bool bNested = false;
+    uint32 nestedKind[2] = {}, nestedPc[5] = {}, nestedCount = 0;
+    bool nestedPcIsBranch3 = false;
     for(uint32 n = 0; n < numPackets && !bHasBranch; n++)
     {
       uint32 info = 0;
@@ -680,11 +739,102 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
         // One time in four (drawn from a generator of its own, so that the
         // other choices are the ones made without it), the FIRST delay slot
         // gets a ",nop" branch instead: S1.2. Then the second slot is a plain packet.
-        const bool bPickSlot1 = bGenSlot1 && bDelayedConditional && modeRng.Below(4) == 0;
+        // One time in three (generator modeRng2), the chain above instead.
+        const bool bPickNested = bGenNested && bDelayedConditional && modeRng2.Below(3) == 0;
+        const bool bPickSlot1 = bGenSlot1 && bDelayedConditional && !bPickNested && modeRng.Below(4) == 0;
         outerPc = cursor - length;
+        if(bPickNested)
+        {
+          uint32 k1 = modeRng2.Below(3), k2 = modeRng2.Below(3);  // 0 plain, 1 ",nop" branch, 2 delayed branch
+          if(k1 == 0 && k2 == 0)
+            k1 = k2 = 2;
+          const bool bPackets34 = (k1 == 2) || (k2 == 2);         // a delayed branch in a slot has slots of its own
+          const bool bPacket4 = (k2 == 2);
+          const uint32 k3 = modeRng2.Below(2);                    // the packet after the slots: plain or ",nop" branch
+          uint32 kinds[5] = { 0, k1, k2, k3, 0 };
+          const uint32 total = bPacket4 ? 5 : bPackets34 ? 4 : 3;
+          nestedPc[0] = outerPc;
+          bool bPlaced = true;
+          uint32 where = cursor;
+          for(uint32 q = 1; q < total && bPlaced; q++)
+          {
+            uint32 placedLength = 0;
+            if(kinds[q] == 0)
+              placedLength = PlacePacket(rng, mpe, mem, where, false, info);
+            else
+            {
+              for(int attempt = 0; attempt < 64 && !placedLength; attempt++)
+              {
+                const uint32 got = PlacePacket(rng, mpe, mem, where, true, info);
+                if(got && ((kinds[q] == 1) ? ((info & PACKETINFO_BRANCH_NOP) != 0) : ((info & kBranchMask) == PACKETINFO_BRANCH_CONDITIONAL)))
+                  placedLength = got;
+              }
+            }
+            if(!placedLength)
+            {
+              bPlaced = false;
+              break;
+            }
+            nestedPc[q] = where;
+            where += placedLength;
+            if(info & PACKETINFO_MEM)
+              bHasMemory = true;
+          }
+          if(bPlaced)
+          {
+            bNested = true;
+            nestedKind[0] = k1;
+            nestedKind[1] = k2;
+            nestedCount = total;
+            nestedPcIsBranch3 = bPackets34 && (k3 == 1);
+            cursor = where;
+            nGenerated++;
+            cGenerated[k1][k2]++;
+          }
+          else
+          {
+            // Could not find the packets wanted: the two slots as plain packets, as before.
+            for(int slot = 0; slot < 2; slot++)
+            {
+              const uint32 slotLength = PlacePacket(rng, mpe, mem, cursor, false, info);
+              cursor += slotLength;
+              if(info & PACKETINFO_MEM)
+                bHasMemory = true;
+            }
+          }
+        }
+        else
+        {
+        // One time in three (generator modeRng3) one delay slot of a delayed branch is made
+        // a scalar load or store through a register (the registers they use are named in
+        // the packet's text, "(r4)").
+        const bool bDelayedOuter = !(info & PACKETINFO_BRANCH_NOP) && (info & (PACKETINFO_BRANCH_ALWAYS | PACKETINFO_BRANCH_CONDITIONAL));
+        const bool bPickSlotMem = bGenSlotMem && bDelayedOuter && !bPickSlot1 && modeRng3.Below(3) == 0;
+        const int memSlot = bPickSlotMem ? (int)modeRng3.Below(2) : -1;
+        const bool bPoke = bPickSlotMem && modeRng3.Below(2) == 0;
         for(int slot = 0; slot < 2; slot++)
         {
           uint32 slotLength = 0;
+          if(slot == memSlot)
+          {
+            for(int attempt = 0; attempt < 400 && !slotLength; attempt++)
+            {
+              const uint32 got = PlacePacket(rng, mpe, mem, cursor, false, info);
+              if(!got || !(info & PACKETINFO_MEMORY_INDIRECT))
+                continue;
+              const std::string text = Disassemble(mpe, mem, cursor, cursor + got);
+              if(text.compare(0, 6, "{ld_s ") && text.compare(0, 6, "{st_s "))
+                continue;
+              const size_t open = text.find("(r");
+              if(open == std::string::npos || text.find(" ; ") != std::string::npos)
+                continue;
+              slotLength = got;
+              smSlot = slot;
+              smSlotPc = cursor;
+              smAddrReg = (uint32)atoi(text.c_str() + open + 2);
+              smPoke = bPoke;
+            }
+          }
           if(slot == 0 && bPickSlot1)
           {
             for(int attempt = 0; attempt < 64; attempt++)
@@ -700,7 +850,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
               slot1Pc = cursor;
             }
           }
-          if(slot == 1 && bDelayedConditional && !bSlot1Branch && rng.Below(3) == 0)
+          if(slot == 1 && bDelayedConditional && !bSlot1Branch && !slotLength && rng.Below(3) == 0)
           {
             for(int attempt = 0; attempt < 64; attempt++)
             {
@@ -718,6 +868,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
           if(info & PACKETINFO_MEM)
             bHasMemory = true;
         }
+        }
       }
     }
     const uint32 endAddress = cursor;
@@ -728,7 +879,33 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
 
     MachineState initial;
     RandomState(rng, initial);
+    if(smSlot >= 0)
+    {
+      // Only if no packet before the access writes the register: the address would
+      // then be something else, anywhere in the machine, including the registers that stop it.
+      uint32 written = 0;
+      for(uint32 pc = kCodeBase; pc < smSlotPc; )
+      {
+        InstructionCacheEntry before;
+        if(!DecodeAt(mpe, mem, pc, before, DECOMPRESS_OPTIONS_SCHEDULE_ECU_LAST))
+          break;
+        for(uint32 i = 0; i < before.nuanceCount; i++)
+          written |= before.scalarOutputDependencies[i];
+        pc = before.pcroute;
+      }
+      if(smPoke && (written & SCALAR_REG_DEPENDENCY_MASK(smAddrReg)))
+        smPoke = false;
+      smGenerated[smSlot][smPoke]++;
+      if(smPoke)
+      {
+        // The address of a control register that is plain state (not cc: see IsSafeControlRegister).
+        static const uint32 registers[] = { 0x08, 0x09, 0x0A, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2B, 0x2C, 0x2D };
+        initial.regs[smAddrReg] = MPE_CTRL_BASE + (registers[modeRng3.Below(sizeof(registers) / sizeof(registers[0]))] << 4);
+      }
+    }
 
+    if(getenv("NUANCE_A64_DIFFTEST_TRACE_SM") && smSlot >= 0)
+      fprintf(stderr, "SM trial %u poke %d reg r%u val %08X: %s\n", trial, (int)smPoke, smAddrReg, initial.regs[smAddrReg], Disassemble(mpe, mem, kCodeBase, endAddress).c_str());
     // --- Interpreter, packet by packet, noting the memory it reaches.
     nuonEnv.compilerOptions.bArm64NativeCode = false;
     mpe.nativeCodeCache.Flush();
@@ -745,6 +922,7 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     a64MemoryTraceHook = TraceHook;
     bool bUndefinedInput = false;
     bool bOuterTaken = false, bInnerTrue = false, bInnerReached = false;
+    uint32 nestedTaken = 4, nestedTarget = 0, interpreterSteps = 0;
     if(bSlot1Branch)
       s1Generated++;
     for(int step = 0; step < 16; step++)
@@ -801,9 +979,25 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
           }
         }
       }
+      const uint32 skipBefore = mpe.ecuSkipCounter;
       mpe.FetchDecodeExecute();
+      interpreterSteps++;
       if(bSlot1Branch && pcBeforeStep == outerPc)
         bOuterTaken = (mpe.ecuSkipCounter != 0);
+      if(bNested && nestedTaken == 4 && skipBefore == 0)
+      {
+        // Which branch of the chain was taken first: a branch is evaluated only when
+        // no earlier one is still pending (the counter was zero as the packet began).
+        for(uint32 j = 0; j < nestedCount; j++)
+        {
+          const bool bBranchPacket = (j == 0) || (j == 1 && nestedKind[0] != 0) || (j == 2 && nestedKind[1] != 0) || (j == 3 && nestedPcIsBranch3);
+          if(bBranchPacket && pcBeforeStep == nestedPc[j] && (mpe.ecuSkipCounter != 0 || mpe.pcexec != sequentialNext))
+          {
+            nestedTaken = j;
+            nestedTarget = mpe.ecuSkipCounter ? mpe.pcfetchnext : mpe.pcexec;
+          }
+        }
+      }
       // A branch that has been taken ends the run, wherever it went: a target
       // inside the run would be the middle of some instruction.
       if(mpe.ecuSkipCounter == 0 && mpe.pcexec != sequentialNext)
@@ -813,6 +1007,8 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
 
     const bool bInterpreterFinished = (mpe.ecuSkipCounter == 0) && (mpe.mpectl & MPECTRL_MPEGO);
     const unsigned s1Class = !bSlot1Branch ? 5 : !bInnerReached ? 4 : (bOuterTaken ? 2 : 0) + (bInnerTrue ? 1 : 0);
+    const unsigned nClass = bNested ? nestedTaken : 5;
+    const unsigned nK1 = nestedKind[0], nK2 = nestedKind[1];
     MachineState interpreted;
     CaptureState(mpe, interpreted);
     for(TraceEntry &entry : g_trace)
@@ -825,6 +1021,17 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
       // itself, or stopped the processor. Nothing to compare.
       numOutside++;
       if(s1Class < 5) s1Outside[s1Class]++;
+      if(nClass < 5) nOutside[nClass]++;
+      if(smSlot >= 0) smOutside[smSlot][smPoke]++;
+      continue;
+    }
+    // A taken branch whose target is inside the run: the interpreter's run goes on
+    // or stops depending on whether that is the next packet, and the native
+    // side's on whether it is where the block ends, so the two comparisons are
+    // not of the same thing. Left out (these are rare).
+    if(bNested && nestedTaken < 4 && nestedTarget >= kCodeBase && nestedTarget <= endAddress)
+    {
+      nAmbiguous++;
       continue;
     }
 
@@ -842,6 +1049,8 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     {
       numNotCompiled++;
       if(s1Class < 5) s1NotCompiled[s1Class]++;
+      if(nClass < 5) { nNotCompiled[nClass]++; cNotCompiled[nK1][nK2]++; }
+      if(smSlot >= 0) smNotCompiled[smSlot][smPoke]++;
       continue;
     }
     const uint32 blockEnd = cacheEntry->nextVirtualAddress;
@@ -869,6 +1078,8 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     a64DebugBlockPc = 0;
     mpe.FetchDecodeExecute();
     const bool bRanNatively = (a64DebugBlockPc == kCodeBase);
+    const uint64 nativeCycles = mpe.cycleCounter;
+    const bool bNativeBailed = (mpe.interpretNextPacket != 0);
 
     // A block may end before the run does (the fetcher stops where it must);
     // the dispatcher interprets the rest, exactly as it would in a game.
@@ -906,6 +1117,34 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     {
       s1Compared[s1Class]++;
       if(bRanNatively && blockEnd > slot1Pc) s1Covered[s1Class]++;
+    }
+    if(smSlot >= 0)
+    {
+      smCompared[smSlot][smPoke]++;
+      if(bNativeBailed) smBailed[smSlot][smPoke]++;
+    }
+    if(bSlot1Branch && bRanNatively && blockEnd == endAddress && !bTargetIsNextPacket)
+    {
+      s1CyclesChecked++;
+      if(nativeCycles != interpreterSteps)
+        s1CyclesDiffer++;
+    }
+    if(nClass < 5)
+    {
+      nCompared[nClass]++;
+      cCompared[nK1][nK2]++;
+      if(bRanNatively && blockEnd == endAddress)
+      {
+        nCovered[nClass]++;
+        cCovered[nK1][nK2]++;
+        nCyclesChecked++;
+        if(nativeCycles != interpreterSteps)
+        {
+          nCyclesDiffer++;
+          if(nCyclesDiffer <= 3)
+            Log("Arm64 JIT difftest: packet count: trial %u native %llu interpreter %u (taken: %u): %s", trial, (unsigned long long)nativeCycles, interpreterSteps, nestedTaken, Disassemble(mpe, mem, kCodeBase, endAddress).c_str());
+        }
+      }
     }
     for(uint32 pc = kCodeBase; pc < endAddress; )
     {
@@ -977,11 +1216,15 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     {
       numUndefined++;
       if(s1Class < 5) s1Undefined[s1Class]++;
+      if(nClass < 5) nUndefined[nClass]++;
+      if(smSlot >= 0) smUndefined[smSlot][smPoke]++;
       continue;
     }
 
     numMismatched++;
     if(s1Class < 5) s1Mismatched[s1Class]++;
+    if(nClass < 5) { nMismatched[nClass]++; cMismatched[nK1][nK2]++; }
+    if(smSlot >= 0) smMismatched[smSlot][smPoke]++;
     const std::string code = Disassemble(mpe, mem, kCodeBase, endAddress);
     // Key the tally on the mnemonic of a single-instruction run; longer runs go
     // under one heading, since any of their instructions could be the one.
@@ -1024,9 +1267,34 @@ void A64_DiffTest(const unsigned trials, const unsigned seed)
     // The runs with a ",nop" branch in the first delay slot of a conditional branch (S1.2).
     static const char * const kClassNames[5] = { "outer not taken, inner false", "outer not taken, inner true", "outer taken, inner false", "outer taken, inner true", "interpreter did not reach the inner branch" };
     Log("Arm64 JIT difftest: slot-1 ,nop branch runs: %u generated%s", s1Generated, bGenSlot1 ? "" : " (NUANCE_A64_DIFFTEST_SLOT1=0)");
+    Log("Arm64 JIT difftest:   slot 1, packets counted as run by the block against the interpreter's: %u runs checked, %u differ", s1CyclesChecked, s1CyclesDiffer);
     for(unsigned c = 0; c < 5; c++)
       Log("Arm64 JIT difftest:   slot 1, %-42s: %u compared (%u of them with the inner branch inside the native block), %u mismatched, %u not compiled natively, %u outside or unfinished, %u undefined-only",
         kClassNames[c], s1Compared[c], s1Covered[c], s1Mismatched[c], s1NotCompiled[c], s1Outside[c], s1Undefined[c]);
+  }
+
+  if(bGenNested)
+  {
+    static const char * const kTakenNames[5] = { "outer branch taken", "branch in slot 1 taken", "branch in slot 2 taken", "branch in the packet after the slots taken", "no branch taken" };
+    static const char * const kKindNames[3] = { "plain", ",nop", "delayed" };
+    Log("Arm64 JIT difftest: nested-slot branch runs: %u generated, %u left out (a taken branch's target inside the run)", nGenerated, nAmbiguous);
+    Log("Arm64 JIT difftest:   nested, packets counted as run by the block against the interpreter's: %u runs checked, %u differ", nCyclesChecked, nCyclesDiffer);
+    for(unsigned c = 0; c < 5; c++)
+      Log("Arm64 JIT difftest:   nested, %-44s: %u compared (%u with the whole chain inside the native block), %u mismatched, %u not compiled natively, %u outside or unfinished, %u undefined-only",
+        kTakenNames[c], nCompared[c], nCovered[c], nMismatched[c], nNotCompiled[c], nOutside[c], nUndefined[c]);
+    for(unsigned x = 0; x < 3; x++)
+      for(unsigned y = 0; y < 3; y++)
+        if(cGenerated[x][y])
+          Log("Arm64 JIT difftest:   nested, slot 1 %-7s slot 2 %-7s: %u generated, %u compared (%u with the whole chain inside the native block), %u mismatched, %u not compiled natively",
+            kKindNames[x], kKindNames[y], cGenerated[x][y], cCompared[x][y], cCovered[x][y], cMismatched[x][y], cNotCompiled[x][y]);
+  }
+
+  if(bGenSlotMem)
+  {
+    for(unsigned s = 0; s < 2; s++)
+      for(unsigned p = 0; p < 2; p++)
+        Log("Arm64 JIT difftest: slot-memory runs, access in delay slot %u, address register %-23s: %u generated, %u compared (%u of them left the native block for the interpreter), %u mismatched, %u not compiled natively, %u outside or unfinished, %u undefined-only",
+          s + 1, p ? "set to a control register" : "left at random", smGenerated[s][p], smCompared[s][p], smBailed[s][p], smMismatched[s][p], smNotCompiled[s][p], smOutside[s][p], smUndefined[s][p]);
   }
 
   // Which instruction handlers that have an emitter never came up. The

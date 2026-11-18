@@ -1805,7 +1805,7 @@ unsigned long long a64PerfTurnEnd[4][A64END_COUNT], a64PerfPackets[4], a64PerfPo
 unsigned long long a64PerfFlushEvents[4][4], a64PerfFlushCalls[4], a64PerfFlushAddresses[4];
 unsigned long long a64PerfRounds, a64PerfEmptyRounds, a64PerfIdleRounds;
 unsigned a64PerfLastTurnPc[4];
-unsigned a64IramThreshold = 3, a64RecompileMarked = 0, a64CompileSlotBranches = 1;
+unsigned a64IramThreshold = 3, a64RecompileMarked = 0, a64CompileSlotBranches = 1, a64CompileNested = 1, a64CompileSlotMemory = 1;
 
 // --- Which packets the interpreter still runs ---
 

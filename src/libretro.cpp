@@ -934,6 +934,10 @@ bool retro_load_game(const struct retro_game_info *game)
         a64IramThreshold = (unsigned)atoi(v);
     if (const char* const v = getenv("NUANCE_A64_SLOT_BRANCHES"))
         a64CompileSlotBranches = (unsigned)atoi(v);
+    if (const char* const v = getenv("NUANCE_A64_NESTED_BRANCHES"))
+        a64CompileNested = (unsigned)atoi(v);
+    if (const char* const v = getenv("NUANCE_A64_SLOT_MEMORY"))
+        a64CompileSlotMemory = (unsigned)atoi(v);
     if (const char* const v = getenv("NUANCE_A64_RECOMPILE_MARKED"))
         a64RecompileMarked = (unsigned)atoi(v);
     if (nuonEnv.compilerOptions.bArm64NativeCode) {

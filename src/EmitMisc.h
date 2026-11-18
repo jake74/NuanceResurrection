@@ -31,6 +31,18 @@ struct EmitterVariables
   // Set by SuperBlock::EmitCodeBlock for a branch that sits in the second
   // delay slot of a conditional branch (see FetchSuperBlock).
   bool bCheckECUSkipCounter = false;
+  // Set by SuperBlock::EmitCodeBlock while it emits a packet whose branch may leave the
+  // block early: how many of the block's packets have not run by then. Emit_ExitBlock
+  // takes them off the MPE's packet count, which was made for the whole block when it began.
+  uint32 a64ExitNotRun = 0;
+  // Set while it emits a delay-slot packet of a branch that may already have been taken
+  // (ecuSkipCounter 1, the native convention: one step for the dispatcher to resolve it):
+  // 2 for the first slot, 1 for the second. A block that leaves from inside such a packet
+  // (the bail to the interpreter, which runs that packet and then the other slot) leaves
+  // the branch as the interpreter would have it, as it is to be found at the next turn:
+  // pending for as many packets as are still to run, plus the one the dispatcher takes off
+  // at the end of this turn. Emit_ExitBlock does the multiplication: 1 becomes 3 or 2.
+  uint32 a64ExitSlotBump = 0;
 #else
   static constexpr bool bCheckECUSkipCounter = false;
 #endif

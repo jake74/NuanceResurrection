@@ -13,6 +13,25 @@ void Emit_NOP(EmitterVariables * const vars, const Nuance &nuance)
 
 void Emit_ExitBlock(const EmitterVariables * const vars)
 {
+#ifdef USE_A64_JIT
+  if(vars->a64ExitNotRun)
+  {
+    // cycleCounter is 64 bits wide, but within a turn it is the sum of the packet
+    // counts of the blocks run so far (at least this block's) and far below 2^32,
+    // so taking from its low word (the first, on a little-endian host) cannot borrow.
+    vars->mpe->nativeCodeCache.X86Emit_SUBIM((int32)vars->a64ExitNotRun, x86MemPtr::x86MemPtr_dword, (uintptr_t)&(vars->mpe->cycleCounter));
+  }
+  if(vars->a64ExitSlotBump)
+  {
+    // ecuSkipCounter is 0 (branch not taken) or 1 (taken) here: counter * 3 or counter * 2, with no
+    // branch, no flags and no label, since the callers have labels of their own pending.
+    const uintptr_t counter = (uintptr_t)&(vars->mpe->ecuSkipCounter);
+    vars->mpe->nativeCodeCache.X86Emit_MOVMR(x86Reg::x86Reg_eax, counter);
+    vars->mpe->nativeCodeCache.X86Emit_LEA(x86Reg::x86Reg_eax, (uintptr_t)x86BaseReg::x86BaseReg_eax, x86IndexReg::x86IndexReg_eax,
+      (vars->a64ExitSlotBump == 2) ? x86ScaleVal::x86Scale_2 : x86ScaleVal::x86Scale_1, 0);
+    vars->mpe->nativeCodeCache.X86Emit_MOVRM(x86Reg::x86Reg_eax, counter);
+  }
+#endif
   vars->mpe->nativeCodeCache.X86Emit_POPAD();
   vars->mpe->nativeCodeCache.X86Emit_RETN();
 }

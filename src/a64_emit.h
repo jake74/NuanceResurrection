@@ -147,6 +147,8 @@ enum A64State
   A64STATE_COUNT
 };
 extern unsigned a64CompileSlotBranches; // compile a ",nop" branch in a conditional branch's second delay slot
+extern unsigned a64CompileSlotMemory; // compile register-indirect memory access in a delay slot (S1.1)
+extern unsigned a64CompileNested; // compile branches in both delay slots, and delayed branches in the slots (S1.3); needs a64CompileSlotBranches
 extern unsigned a64IramThreshold;  // runs before a packet in MPE local memory is compiled
 extern unsigned a64RecompileMarked; // compile a packet marked COMPILED that has no block
 

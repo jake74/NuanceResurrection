@@ -404,7 +404,26 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
           codeCache.emitVars.scalarRegOutDep = pInstruction->scalarOutputDependencies;
           codeCache.emitVars.miscRegOutDep = pInstruction->miscOutputDependencies;
 #ifdef USE_A64_JIT
-          codeCache.emitVars.bCheckECUSkipCounter = a64GuardedPacketPc && (pInstruction->packet->pcexec == a64GuardedPacketPc);
+          {
+            // Which way out of the block this instruction has, if any, and how it leaves
+            // the packet count and the branch: a ",nop" branch in a guarded packet that is
+            // taken (the packet's last instruction) leaves with the branch resolved; any
+            // other instruction in a delay slot (a bail) leaves with the branch still pending.
+            const uint32 pc = pInstruction->packet->pcexec;
+            uint32 notRun = 0;
+            codeCache.emitVars.bCheckECUSkipCounter = A64GuardFor(pc, notRun);
+            const uint32 slotBump = (a64SlotPc[0] && pc == a64SlotPc[0]) ? 2 : (a64SlotPc[1] && pc == a64SlotPc[1]) ? 1 : 0;
+            if(codeCache.emitVars.bCheckECUSkipCounter && (pInstruction[1].flags & SUPERBLOCKINFO_PACKETEND))
+            {
+              codeCache.emitVars.a64ExitNotRun = notRun;
+              codeCache.emitVars.a64ExitSlotBump = 0;
+            }
+            else
+            {
+              codeCache.emitVars.a64ExitNotRun = slotBump; // the packet itself and what follows it do not run
+              codeCache.emitVars.a64ExitSlotBump = slotBump;
+            }
+          }
 #endif
 
           ((NativeEmitHandler)(emitHandlers[pInstruction->instruction.fields[0]]))(&codeCache.emitVars,pInstruction->instruction);
@@ -436,6 +455,12 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
           Emit_SaveRegs(&codeCache.emitVars,pInstruction->instruction);
         }
       }
+#ifdef USE_A64_JIT
+      else if((flags & SUPERBLOCKINFO_PACKETEND) && a64Chain.numActions)
+      {
+        A64EmitChainPacketEnd(codeCache, pInstruction->packet->pcexec);
+      }
+#endif
       // Note: PACKETEND is intentionally not handled here. The IL emit loop above
       // emits Handler_CheckECUSkipCounter at every PACKETEND to drive the
       // ecuSkipCounter=3 / decrement-per-packet scheme. The native path uses
@@ -445,6 +470,20 @@ bool SuperBlock::EmitCodeBlock(NativeCodeCache &codeCache, const bool bContainsB
       pInstruction++;
     }
 
+#ifdef USE_A64_JIT
+    if(a64Chain.bNormalise)
+    {
+      // The block ends with a branch taken, under its code: back to 1, as the
+      // dispatcher expects it (it takes one off and goes to pcfetchnext).
+      codeCache.patchMgr.Reset();
+      codeCache.X86Emit_MOVMR(x86Reg::x86Reg_eax, (uintptr_t)&(codeCache.emitVars.mpe->ecuSkipCounter));
+      codeCache.X86Emit_TESTRR(x86Reg::x86Reg_eax, x86Reg::x86Reg_eax);
+      codeCache.X86Emit_JCC_Label(X86_CC_Z, 0);
+      codeCache.X86Emit_MOVIM(1, x86MemPtr::x86MemPtr_dword, (uintptr_t)&(codeCache.emitVars.mpe->ecuSkipCounter));
+      codeCache.SetLabelPointer(0);
+      codeCache.patchMgr.ApplyPatches();
+    }
+#endif
     codeCache.X86Emit_MOVIM(exitAddress, x86MemPtr::x86MemPtr_dword,(uintptr_t)&(codeCache.emitVars.mpe->pcexec));
 
     if(numInstructions > 0)
@@ -953,6 +992,113 @@ void SuperBlock::UpdateDependencyInfo()
 // 3000's drawing loops was being interpreted on their account.
 #define DELAY_SLOT_BLOCKERS (PACKETINFO_MEMORY_INDIRECT|PACKETINFO_ECU|PACKETINFO_NEVERCOMPILE)
 
+#ifdef USE_A64_JIT
+// What a packet in a delay slot (or after one) is, for the branches-in-slots
+// shapes of FetchSuperBlock: 0 a packet with nothing in it that keeps a block
+// from being compiled, 1 a ",nop" branch (only that), 2 a delayed conditional
+// branch (only that), -1 anything else.
+// Whether an instruction of the packet may leave the block before the packet has run: the
+// loads and stores through a register, which leave when the address turns out to be in the
+// control or tag windows (EmitMEM.cpp), and the loads of control registers the emitter has no
+// code for. (Not every one of these is marked MEMORY_INDIRECT: only ld_s, st_s and st_v are.)
+static bool A64PacketCanBail(const InstructionCacheEntry &packet)
+{
+  if(packet.packetInfo & (PACKETINFO_MEMORY_INDIRECT | PACKETINFO_MEMORY_IO))
+    return true;
+  for(uint32 i = 0; i < packet.nuanceCount; i++)
+  {
+    const uint32 handler = packet.handlers[i];
+    if(handler == Handler_LoadScalarLinear || handler == Handler_StoreScalarLinear || handler == Handler_LoadVectorLinear || handler == Handler_StoreVectorLinear)
+      return true;
+  }
+  return false;
+}
+
+static int A64ClassifySlotPacket(const InstructionCacheEntry &packet)
+{
+  const uint32 info = packet.packetInfo;
+  if(info & PACKETINFO_BREAKPOINT)
+    return -1;
+  // Branches in slots are kept to the shapes whose counter has only the values the
+  // dispatcher expects while the block runs: a packet that can leave the block mid-way is
+  // not one of them (see A64Chain).
+  if(A64PacketCanBail(packet))
+    return -1;
+  const uint32 blockers = info & DELAY_SLOT_BLOCKERS;
+  if(!blockers)
+    return 0;
+  if(blockers != PACKETINFO_ECU)
+    return -1;
+  if(info & PACKETINFO_BRANCH_NOP)
+    return 1;
+  if((info & (PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_ALWAYS | PACKETINFO_BRANCH_NOP)) == PACKETINFO_BRANCH_CONDITIONAL)
+    return 2;
+  return -1;
+}
+
+// The code a taken branch is kept under in ecuSkipCounter while the block runs on
+// to the end of that branch's delay slots: more than any value the counter has
+// outside generated code (0 to 3), different for each of the three branches.
+#define A64_CHAIN_CODE_BASE (8U)
+
+bool SuperBlock::A64GuardFor(const uint32 pc, uint32 &notRun) const
+{
+  if(a64GuardedPacketPc && pc == a64GuardedPacketPc)
+  {
+    notRun = a64GuardedNotRun;
+    return true;
+  }
+  for(uint32 i = 0; i < a64Chain.numGuarded; i++)
+  {
+    if(a64Chain.guardedPc[i] == pc)
+    {
+      notRun = a64Chain.guardedNotRun[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+// What goes after the last instruction of a packet of a chain of branches in delay slots:
+// first a branch the packet has just taken gets its code (it left ecuSkipCounter at 1,
+// which only the first branch taken can do: the others are skipped while it is not 0), then
+// the exit of every branch whose delay slots end here.
+void SuperBlock::A64EmitChainPacketEnd(NativeCodeCache &codeCache, const uint32 pc)
+{
+  EmitterVariables * const vars = &codeCache.emitVars;
+  const uintptr_t counter = (uintptr_t)&(vars->mpe->ecuSkipCounter);
+  for(uint32 a = 0; a < a64Chain.numActions; a++)
+  {
+    const A64Chain::Action &action = a64Chain.actions[a];
+    if(action.pc != pc)
+      continue;
+    if(action.postCode)
+    {
+      codeCache.patchMgr.Reset();
+      codeCache.X86Emit_MOVMR(x86Reg::x86Reg_eax, counter);
+      codeCache.X86Emit_CMPIR(1, x86Reg::x86Reg_eax);
+      codeCache.X86Emit_JCC_Label(X86_CC_NZ, 0);
+      codeCache.X86Emit_MOVIM((int32)action.postCode, x86MemPtr::x86MemPtr_dword, counter);
+      codeCache.SetLabelPointer(0);
+      codeCache.patchMgr.ApplyPatches();
+    }
+    for(uint32 e = 0; e < action.numExits; e++)
+    {
+      codeCache.patchMgr.Reset();
+      codeCache.X86Emit_MOVMR(x86Reg::x86Reg_eax, counter);
+      codeCache.X86Emit_CMPIR((intptr_t)action.exitCode[e], x86Reg::x86Reg_eax);
+      codeCache.X86Emit_JCC_Label(X86_CC_NZ, 0);
+      codeCache.X86Emit_MOVIM(1, x86MemPtr::x86MemPtr_dword, counter);
+      vars->a64ExitNotRun = action.exitNotRun[e];
+      Emit_ExitBlock(vars);
+      vars->a64ExitNotRun = 0;
+      codeCache.SetLabelPointer(0);
+      codeCache.patchMgr.ApplyPatches();
+    }
+  }
+}
+#endif
+
 int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
 {
   uint32 decodeOptions = (DECOMPRESS_OPTIONS_SCHEDULE_ECU_LAST | DECOMPRESS_OPTIONS_SCHEDULE_MEM_FIRST);
@@ -966,6 +1112,9 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
   bContainsBranch = false;
 #ifdef USE_A64_JIT
   a64GuardedPacketPc = 0;
+  a64GuardedNotRun = 0;
+  a64SlotPc[0] = a64SlotPc[1] = 0;
+  memset(&a64Chain, 0, sizeof(a64Chain));
 #endif
 
   nextDelayCounter = 0;
@@ -1095,6 +1244,7 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
             {
               slotBlockers = 0;
               a64GuardedPacketPc = packetDelaySlot2.pcexec;
+              a64GuardedNotRun = 0;
             }
             // The same for a ",nop" branch in the FIRST delay slot (S1.2 of
             // docs/speed-plan.md): "bra gt, A / bra B, nop / <plain packet>". If
@@ -1110,6 +1260,8 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
             // branch must be the ",nop" kind (a delayed one would need delay
             // slots of its own, which lie outside the block: S1.3).
             bool bSlot1Guarded = false;
+            bool bChain = false, bChainNeed3 = false, bChainNeed4 = false;
+            InstructionCacheEntry packetChain3, packetChain4;
             if(!a64GuardedPacketPc && a64CompileSlotBranches && bCanEmitNativeCode
               && ((packet.packetInfo & (PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_ALWAYS)) == PACKETINFO_BRANCH_CONDITIONAL)
               && ((packetDelaySlot1.packetInfo & DELAY_SLOT_BLOCKERS) == PACKETINFO_ECU)
@@ -1119,6 +1271,131 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               slotBlockers = 0;
               bSlot1Guarded = true;
               a64GuardedPacketPc = packetDelaySlot1.pcexec;
+              a64GuardedNotRun = 1; // the second slot does not run when the branch is taken
+            }
+
+            // Branches in both delay slots, and delayed branches in the slots (S1.3 of
+            // docs/speed-plan.md): "bra A / bra B / bra C / bra D, nop / <plain>" is how Tempest
+            // 3000 writes its chains of compares. What the interpreter does, with the counter
+            // ecuSkipCounter that a taken branch sets to 3 and every packet takes one off: a
+            // branch is evaluated only while the counter is 0, and a taken branch lets the
+            // two packets after it run, without their branches, and goes on at its target; a
+            // taken ",nop" branch goes on at its target at once. So the first branch taken decides
+            // where the block ends: the outer branch after its slot 2, a delayed branch in
+            // slot 1 after the packet that follows slot 2 (P3), one in slot 2 after the one
+            // after that (P4), a ",nop" branch at once. P3 and P4 must be there for the block
+            // to be able to end where the interpreter would: P3 plain or a ",nop" branch
+            // (which is evaluated only if no earlier branch was taken, as ever), P4 plain; if
+            // none of the branches is taken the block runs to the end of P3 or P4 and goes on
+            // from there. The emitters already skip a branch when ecuSkipCounter is not 0
+            // (bCheckECUSkipCounter; set here for every branch in a slot or after them) and a
+            // taken one leaves it at 1 with pcfetchnext set; what is added is that the block
+            // runs on past the branch to where its delay slots end, and leaves there: the
+            // counter is kept as a code of the branch while it does (see A64Chain), because
+            // "taken" alone does not say which branch it was and so where the block ends.
+            // Register-indirect memory access in a delay slot (S1.1 of docs/speed-plan.md): ld_s,
+            // st_s and st_v through a register leave the block when the address is in the
+            // control or tag windows and the interpreter runs that packet. What was holding
+            // these packets out of blocks was that this left the branch resolved too soon
+            // (ecuSkipCounter at 1, as the block leaves it for the dispatcher to take one off
+            // and go to pcfetchnext, with the slot packets still to run); EmitCodeBlock now
+            // leaves it pending for as many packets as are still to run (a64SlotPc,
+            // EmitterVariables::a64ExitSlotBump), which is how the interpreter has it. Only
+            // that blocker: no ECU instruction and nothing never to be compiled in either slot.
+            bool bSlotMemory = false;
+            if(slotBlockers == PACKETINFO_MEMORY_INDIRECT && a64CompileSlotMemory && bCanEmitNativeCode
+              && !((packetDelaySlot1.packetInfo | packetDelaySlot2.packetInfo) & PACKETINFO_BREAKPOINT))
+            {
+              slotBlockers = 0;
+              bSlotMemory = true;
+            }
+
+            if(slotBlockers && !a64GuardedPacketPc && a64CompileSlotBranches && a64CompileNested && bCanEmitNativeCode
+              && packetCounter >= 4 // room for P3 and P4 in the lists, which have two packets to spare
+              && ((packet.packetInfo & (PACKETINFO_BRANCH_CONDITIONAL | PACKETINFO_BRANCH_ALWAYS)) == PACKETINFO_BRANCH_CONDITIONAL))
+            {
+              const int kind1 = A64ClassifySlotPacket(packetDelaySlot1);
+              const int kind2 = A64ClassifySlotPacket(packetDelaySlot2);
+              if(kind1 >= 0 && kind2 >= 0 && (kind1 != 0 || kind2 != 0))
+              {
+                const bool bNeed3 = (kind1 == 2) || (kind2 == 2);
+                const bool bNeed4 = (kind2 == 2);
+                int kind3 = 0;
+                bool bOk = true;
+                if(bNeed3)
+                {
+                  packetChain3.pcexec = packetAddress;
+                  pMPE->DecompressPacket((uint8 *)nuonEnv.GetPointerToMemory(pMPE->mpeIndex, packetAddress, false), packetChain3, decodeOptions);
+                  kind3 = A64ClassifySlotPacket(packetChain3);
+                  bOk = (kind3 == 0) || (kind3 == 1);
+                  if(bOk && bNeed4)
+                  {
+                    packetChain4.pcexec = packetChain3.pcroute;
+                    pMPE->DecompressPacket((uint8 *)nuonEnv.GetPointerToMemory(pMPE->mpeIndex, packetChain3.pcroute, false), packetChain4, decodeOptions);
+                    bOk = (A64ClassifySlotPacket(packetChain4) == 0);
+                  }
+                }
+                if(bOk)
+                {
+                  bChain = true;
+                  bChainNeed3 = bNeed3;
+                  bChainNeed4 = bNeed4;
+                  slotBlockers = 0;
+
+                  // Positions: 0 the outer branch, 1 and 2 its slots, 3 and 4 the packets after them.
+                  const uint32 last = bNeed4 ? 4 : bNeed3 ? 3 : 2;
+                  const int kinds[5] = { 2, kind1, kind2, kind3, 0 };
+                  const InstructionCacheEntry * const entries[5] = { &packet, &packetDelaySlot1, &packetDelaySlot2, &packetChain3, &packetChain4 };
+                  bool listed[5];
+                  for(uint32 q = 0; q < 5; q++)
+                    listed[q] = (q <= last) && (q == 0 || (!(entries[q]->packetInfo & PACKETINFO_NOP) && entries[q]->nuanceCount != 0));
+                  // (positions after 'last' were not decoded and are not looked at)
+                  for(uint32 q = 1; q <= last && q <= 3; q++)
+                  {
+                    if(kinds[q] != 0)
+                    {
+                      a64Chain.guardedPc[a64Chain.numGuarded] = entries[q]->pcexec;
+                      a64Chain.guardedNotRun[a64Chain.numGuarded] = (kinds[q] == 1) ? (last - q) : 0;
+                      a64Chain.numGuarded++;
+                    }
+                  }
+                  if(kind1 == 2 || kind2 == 2)
+                  {
+                    // Delayed branches in the slots: every delayed branch of the chain, the
+                    // outer one too, takes a code, and leaves the block where its slots end
+                    // (unless that is the end of the block).
+                    a64Chain.bNormalise = true;
+                    A64Chain::Action actions[5];
+                    memset(actions, 0, sizeof(actions));
+                    for(uint32 q = 0; q <= last; q++)
+                      actions[q].pc = entries[q]->pcexec;
+                    for(uint32 q = 0; q <= 2; q++)
+                    {
+                      if(kinds[q] != 2)
+                        continue;
+                      actions[q].postCode = A64_CHAIN_CODE_BASE + q;
+                      const uint32 ends = q + 2;
+                      if(ends < last)
+                      {
+                        // At the last listed packet up to the one the slots end with (a packet
+                        // that is only a no-op is not in the block).
+                        uint32 at = ends;
+                        while(!listed[at])
+                          at--;
+                        A64Chain::Action &action = actions[at];
+                        action.exitCode[action.numExits] = A64_CHAIN_CODE_BASE + q;
+                        action.exitNotRun[action.numExits] = last - ends;
+                        action.numExits++;
+                      }
+                    }
+                    for(uint32 q = 0; q <= last; q++)
+                    {
+                      if(listed[q] && (actions[q].postCode || actions[q].numExits))
+                        a64Chain.actions[a64Chain.numActions++] = actions[q];
+                    }
+                  }
+                }
+              }
             }
 #endif
             if(slotBlockers)
@@ -1165,6 +1442,12 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               bCanEmitNativeCode = bCanEmitNativeCode && bPacketAllowsNativeCode;
               numInstructions += (packet.nuanceCount + 2);
               numPackets++;
+#ifdef USE_A64_JIT
+              // A slot packet that leaves the block exposes what the packets before it did:
+              // see the SYNC mark after the first slot.
+              if(bSlotMemory)
+                instructions[numInstructions - 1].flags |= SUPERBLOCKINFO_SYNC;
+#endif
               }
               packetCounter--;
 
@@ -1173,6 +1456,10 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
               // Handler_CheckECUSkipCounter decrements at the right cadence
               if((!(packetDelaySlot1.packetInfo & PACKETINFO_NOP) && (packetDelaySlot1.nuanceCount != 0)) || bForceILBlock)
               {
+#ifdef USE_A64_JIT
+                if(!bChain)
+                  a64SlotPc[0] = packetDelaySlot1.pcexec;
+#endif
                 AddPacketToList(packetDelaySlot1,numPackets);              
                 const bool bPacketAllowsNativeCode = AddInstructionsToList(packetDelaySlot1,&packets[numPackets],numInstructions,bForceILBlock);
                 bCanEmitNativeCode = bCanEmitNativeCode && bPacketAllowsNativeCode;
@@ -1187,7 +1474,7 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
                 // packets are allowed to kill (the same mark the end of every
                 // block carries), so nothing written up to and including this
                 // packet is removed on account of the second delay slot.
-                if(bSlot1Guarded)
+                if(bSlot1Guarded || bChain || bSlotMemory)
                   instructions[numInstructions - 1].flags |= SUPERBLOCKINFO_SYNC;
 #endif
               }
@@ -1195,18 +1482,54 @@ int32 SuperBlock::FetchSuperBlock(uint32 packetAddress, bool &bContainsBranch)
 
               if((!(packetDelaySlot2.packetInfo & PACKETINFO_NOP) && (packetDelaySlot2.nuanceCount != 0)) || bForceILBlock)
               {
+#ifdef USE_A64_JIT
+                if(!bChain)
+                  a64SlotPc[1] = packetDelaySlot2.pcexec;
+#endif
                 AddPacketToList(packetDelaySlot2,numPackets);              
                 const bool bPacketAllowsNativeCode = AddInstructionsToList(packetDelaySlot2,&packets[numPackets],numInstructions,bForceILBlock);
                 bCanEmitNativeCode = bCanEmitNativeCode && bPacketAllowsNativeCode;
                 numInstructions += (packetDelaySlot2.nuanceCount + 2);
                 numPackets++;
+#ifdef USE_A64_JIT
+                // As for the first slot: with branches that can leave the block before
+                // the end, writes up to here must stay (see the SYNC mark above).
+                if(bChain && bChainNeed3)
+                  instructions[numInstructions - 1].flags |= SUPERBLOCKINFO_SYNC;
+#endif
               }
               packetCounter--;
 
               packetsProcessed += 2;
+#ifdef USE_A64_JIT
+              if(bChain && bChainNeed3)
+              {
+                // P3 and P4, the packets after the slots: see the shape above.
+                for(int extra = 0; extra < (bChainNeed4 ? 2 : 1); extra++)
+                {
+                  InstructionCacheEntry &packetExtra = extra ? packetChain4 : packetChain3;
+                  if(!(packetExtra.packetInfo & PACKETINFO_NOP) && (packetExtra.nuanceCount != 0))
+                  {
+                    AddPacketToList(packetExtra,numPackets);
+                    const bool bPacketAllowsNativeCode = AddInstructionsToList(packetExtra,&packets[numPackets],numInstructions,false);
+                    bCanEmitNativeCode = bCanEmitNativeCode && bPacketAllowsNativeCode;
+                    numInstructions += (packetExtra.nuanceCount + 2);
+                    numPackets++;
+                    if(bChainNeed4 && !extra)
+                      instructions[numInstructions - 1].flags |= SUPERBLOCKINFO_SYNC;
+                  }
+                  packetCounter--;
+                  packetsProcessed++;
+                }
+              }
+#endif
               packetCounter = 0; //!! ?? never used again anyway
 
               exitAddress = packetDelaySlot2.pcroute;
+#ifdef USE_A64_JIT
+              if(bChain && bChainNeed3)
+                exitAddress = bChainNeed4 ? packetChain4.pcroute : packetChain3.pcroute;
+#endif
               // IL downgrade: forbid native compile so the IL block path is used.
               // The IL path's per-PACKETEND Handler_CheckECUSkipCounter is required
               // to drive the delay-slot timing for the embedded branch

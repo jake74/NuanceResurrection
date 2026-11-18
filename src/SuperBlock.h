@@ -121,6 +121,37 @@ private:
   bool bCanEmitNativeCode;
 #ifdef USE_A64_JIT
   uint32 a64EmitFailure; // A64_EMIT_*: set by EmitCodeBlock when the native block could not be emitted
+  // How many packets of the block do not run when the branch of the packet a64GuardedPacketPc
+  // names is taken: a ",nop" branch that is taken leaves the block at once.
+  uint32 a64GuardedNotRun = 0;
+  // The two delay-slot packets of the block's delayed branch, for the instructions in them that
+  // can leave the block (see EmitterVariables::a64ExitSlotBump); 0 where there is none.
+  uint32 a64SlotPc[2] = { 0, 0 };
+
+  // Branches in the delay slots of a delayed conditional branch, S1.3 of docs/speed-plan.md
+  // (see FetchSuperBlock): the packets P0 (the outer branch), P1 and P2 (its slots), and when a
+  // slot holds a delayed branch P3 and P4, the packets after them that are its slots in turn.
+  // The first branch taken decides where the block ends; what it takes is kept in ecuSkipCounter
+  // as a code (A64_CHAIN_CODE_BASE + the packet's position), and the packet at which the branch's
+  // own delay slots end leaves the block when it finds the code there.
+  struct A64Chain
+  {
+    uint32 numGuarded;           // packets whose branch is emitted with the ecuSkipCounter check
+    uint32 guardedPc[3];
+    uint32 guardedNotRun[3];     // packets that do not run when that packet's ",nop" branch is taken
+    uint32 numActions;
+    struct Action
+    {
+      uint32 pc;                 // the packet whose end this is attached to
+      uint32 postCode;           // after the packet: a branch it has just taken (counter 1) becomes this code (0: none)
+      uint32 numExits;
+      uint32 exitCode[2];        // after the packet: leave the block when the counter holds this code
+      uint32 exitNotRun[2];      // packets that do not run when it does
+    } actions[5];
+    bool bNormalise;             // at the end of the block: a taken branch's code becomes 1 again
+  } a64Chain;
+  bool A64GuardFor(const uint32 pc, uint32 &notRun) const;
+  void A64EmitChainPacketEnd(NativeCodeCache &codeCache, const uint32 pc);
 #endif
   static constexpr bool bAllowBlockCompile = (COMPILE_TYPE != SuperBlockCompileType::SUPERBLOCKCOMPILETYPE_IL_SINGLE);
 };
