@@ -248,7 +248,8 @@ in that address range before a run. Seeds 1 to 12, both items on: 177,322,
 177,422, 177,169 and 177,472 compared, 0 mismatched on every seed. (The
 per-seed totals quoted in the sections above predate this change and may
 differ from a run today by a few runs; with every new part switched off,
-seed 1 still gives S1.2's 180,888, checked after the change.)
+seed 1 gave S1.2's 180,888 exactly before the change and gives 180,892 after
+it: the four runs the rewritten memory now lets finish.)
 
 **Timing on the Mac, ordinary builds, `NUANCE_PERF` off, no limit.** The Mac
 ran most measurement runs of this day at reduced speed: the headless host made
