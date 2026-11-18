@@ -267,4 +267,4 @@ round (game frames in 80 s, boot included):
 
 S1.3 is small but ahead in every comparable round; both items are kept.
 
-On the Pad: not measured.
+On the Pad: not measured. Played by hand after S1.3 and S1.1 (2026-11-18), with the frame rate counter: 28-30 in ordinary play, around 20 in heavy scenes, about 12 at worst in a very busy scene. Whether that worst case is a scene not met before or a regression is not known: the earlier notes give 18-26 for the busiest scenes, without saying which.
