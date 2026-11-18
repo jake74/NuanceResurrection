@@ -296,3 +296,51 @@ code 74%, interpreter 4%, dispatcher 8%. On the Pad the time outside
 generated code is the larger half, so what Stage 0 found on the Mac does not
 carry over as it is: the Pad needs its own measurement with the counters
 built in.
+
+## The Pad measured: busy scene at the console's own speed (2026-11-18)
+
+Headless on the Pad (`perf_host` from `/data/local/tmp/nagori/stage0`, the
+busy-scene script above, 150 s, frame cap 30, as in the app), counters built
+in, three runs; then release 0.3's core (`d766e8c`) against today's
+(`cef6b20`), ordinary builds, three runs each, alternating.
+
+**Today's core is faster than 0.3's on the Pad**, not slower: 3,563, 3,564 and
+3,574 game frames in 150 s for 0.3; 3,757, 3,759 and 3,762 for today's
+(+5.4%, the light stretches included). Jake's worst of about 12 is therefore
+most likely a heavier scene than the ones measured before, not a regression.
+
+The runs repeat closely: every counters run holds 29-30 in the light
+stretches and 21-22 in a heavy one that lasts the final minute.
+
+| | light stretch (29-30 fps) | heavy stretch (21-22 fps) |
+|---|---|---|
+| generated code | 39.9% | 61.2% |
+| interpreter | 3.7% | 4.8% |
+| dispatcher proper | 21.1% | 6.9% |
+| round level | 15.8% | 6.3% |
+| media tick and loop between turns | 12.1% | 10.7% |
+| asleep | 3.9% | 7.4% |
+| rounds a second | 13.4 M | 3.9 M |
+| MPE0 packets per running turn | 4.1 | 14.1 |
+
+In the light stretch the game is held by the frame cap; MPE1 and MPE2 are
+halted most of the time and MPE0 spins in its wait loop, interpreted, about
+7 million turns a second. That is why the dispatcher and the round level look
+large there: the thread is busy waiting, not short of time. (It costs power,
+not frames.)
+
+**In the heavy stretch the Pad runs the processors at the console's own
+speed.** MPE0 runs 53.6 million packets a second against the speed limit of 54
+million, MPE1 50.9 and MPE2 46.9, and the thread still sleeps 7% of the time.
+So 21-22 fps there is what the original hardware would give, as far as the
+packet count is a measure of it; making the generated code faster cannot raise
+it. With the speed limit removed (`NUANCE_MPE_HZ=0`, frame cap still 30, two
+runs) the same stretch gives 22-23 fps (3,886 and 3,884 game frames in 150 s,
++4.3%): MPE0 58.0 million a second, and the thread no longer sleeps. The Pad
+has about 8% to spare over the console in this scene.
+
+What follows: on the Pad, compiler work helps only in scenes where the Pad
+falls below the console's speed (perhaps Jake's 12 fps one), or if the game is
+allowed to run its processors faster than the console's, which would keep busy
+scenes smoother than the original. Either way the time is now mostly in
+generated code (61-66%), not in the interpreter or the dispatcher.
